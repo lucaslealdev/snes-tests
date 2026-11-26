@@ -2,4 +2,5 @@
 *.o
 *.sfc
 *.swp
-
+/build/
+__pycache__/

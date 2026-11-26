@@ -1,11 +1,42 @@
 #!/usr/bin/env python3
+"""Generates the SPC-700 test code, plus the metadata tables used by the harness to report failures.
 
-TESTS_PER_FILE = 500
+Usage: make_tests.py [output_dir]      (default output_dir: ../build)
+
+Outputs (all in output_dir):
+  spc-tests<N>.asm  test code for spcasm. Each file only contains whole groups of tests.
+  spc-tests.txt     human readable description of every test
+  spc-meta.inc      per-test records, group table, file table (for ca65)
+  spc-data.inc      segments that include the assembled spc-tests<N>.spc files (for ca65)
+  spc-meta.json     counts used by the other build steps
+"""
+import json
+import os
+import sys
+
+# A file is closed (at a group boundary) before it would exceed this many characters of generated assembly
+# (about 10 characters per byte of machine code). The assembled code of one file, including the test table, must
+# fit in a 32KB ROM bank, which the Makefile checks.
+MAX_FILE_CHARS = 280000
 
 test_num = 0
-file_num = 0
 tests_txt = []
-spc_code = []
+spc_code = []       # code of the group that is currently being generated
+
+TESTS = []
+GROUPS = []
+current_group = None
+
+# Check kinds. Keep in sync with cputest/make_cpu_tests.py and tools/defs.py
+CHK_CTRL = 0   # a branch/jump went the wrong way
+CHK_X = 1
+CHK_Y = 2
+CHK_P = 3
+CHK_A = 4
+CHK_SP = 5
+CHK_MEM = 8
+
+TAG_UNDOCUMENTED = 0x02
 
 FLAGS_MAP = {'C': 1, 'Z': 2, 'I': 4, 'H': 8, 'B': 0x10, 'P': 0x20, 'V': 0x40, 'N': 0x80}
 
@@ -54,9 +85,6 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
       at specific points.
     '''
     global test_num
-    if test_num % TESTS_PER_FILE == 0 and test_num != 0:
-        close_spc_file()
-        start_spc_file()
 
     p = flags(p)
     ep = flags(ep, p)
@@ -105,30 +133,41 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
     spc_code.append(f'        {ins}')
     if after_ins:
         spc_code.append(after_ins)
-    spc_code.append(f'''\
-        call save_results ; now a = result psw
-        cmp a, #${ep:02x}
-        bne .to_fail
-        cmp result_a, #${ea:02x}
-        bne .to_fail
-        cmp x, #${ex:02x}
-        bne .to_fail
-        cmp y, #${ey:02x}
-        bne .to_fail''')
-    if esp is not None:
+
+    # Every check that can fail gets an inline stub that records the kind of check and the expected value, then
+    # calls fail_chk. That reports the failure to the main CPU and returns, and the test goes on to the next one.
+    # The stub is skipped with a `beq`. (The stub is 10 bytes, so it is always in branch range.)
+    checks = []
+
+    def check(kind, expected, cmp_lines, extra=()):
+        label = f'.c{len(checks)}'
+        checks.append((kind, expected, None))
+        spc_code.extend(f'        {line}' for line in cmp_lines)
+        spc_code.append(f'        beq {label}')
+        spc_code.extend(f'        {line}' for line in extra)
         spc_code.append(f'''\
-        mov x, sp
-        cmp x, #${esp:02x}
-        bne .to_fail''')
+        mov y, #${expected:02x}
+        mov a, #{kind}
+        call fail_chk
+        jmp .next_test
+    {label}:''')
+
+    spc_code.append('        call save_results ; now a = result psw')
+    check(CHK_P, ep, [f'cmp a, #${ep:02x}'])
+    check(CHK_A, ea, [f'cmp result_a, #${ea:02x}'])
+    check(CHK_X, ex, [f'cmp x, #${ex:02x}'])
+    check(CHK_Y, ey, [f'cmp y, #${ey:02x}'])
+    if esp is not None:
+        check(CHK_SP, esp, ['mov x, sp', f'cmp x, #${esp:02x}'], extra=['mov fsp, x'])
 
     for loc, val in mem_output.items():
         if val is not None:
             if loc < 0x100:
-                spc_code.append(f'        cmp ${loc:02x}, #${val:02x}')
+                lines = [f'cmp ${loc:02x}, #${val:02x}']
             else:
-                spc_code.append(f'        mov a, ${loc:04x}')
-                spc_code.append(f'        cmp a, #${val:02x}')
-            spc_code.append('        bne .to_fail')
+                lines = [f'mov a, ${loc:04x}', f'cmp a, #${val:02x}']
+            check(CHK_MEM, val, lines, extra=[f'mov fptr, #${loc & 0xFF:02x}', f'mov fptr+1, #${loc >> 8:02x}'])
+            checks[-1] = (CHK_MEM, val, loc)
 
     if after_checks:
         spc_code.append(after_checks)
@@ -136,7 +175,9 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
     spc_code.append('''\
         bra .next_test
     .to_fail:
-        jmp fail
+        mov y, #0
+        mov a, #0
+        call fail_chk
     .next_test:
     ''')
 
@@ -155,6 +196,9 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
     if before_regs or before_ins or after_ins or after_checks:
         tests_txt.append('   Additional initialization or checks are performed - see assembly')
 
+    TESTS.append(dict(num=test_num, group=current_group['index'], ins=ins, a=a, x=x, y=y, p=p,
+                      tags=TAG_UNDOCUMENTED if current_group['undocumented'] else 0, checks=checks,
+                      mem_input=mem_input, mem_output=mem_output))
     test_num += 1
 
 
@@ -256,14 +300,14 @@ def test_branch_taken(base_ins, **kwargs):
     .branch:'''
     after = '''\
         call save_results
-        bra .to_fail
+        jmp .to_fail
     .ok2:'''
     test(f'{base_ins} .ok', before_ins=before, after_ins=after, **kwargs)
 
     # branch forward:
     after = '''\
         call save_results
-        bra .to_fail
+        jmp .to_fail
     .ok:'''
     test(f'{base_ins} .ok', after_ins=after, **kwargs)
 
@@ -273,7 +317,7 @@ def test_branch_not_taken(base_ins, **kwargs):
         bra .ok
     .not_ok:
         call save_results
-        bra .to_fail
+        jmp .to_fail
     .ok:'''
     test(f'{base_ins} .not_ok', after_ins=after, **kwargs)
 
@@ -381,7 +425,7 @@ def brk_tests():
 
     after_ins = '''\
     .after_brk:
-        bra .to_fail
+        jmp .to_fail
     .brk_target:'''
 
     after_checks = '''\
@@ -402,7 +446,7 @@ def brk_tests():
 def call_tests():
     after_ins = '''\
     .after_call:
-        bra .to_fail
+        jmp .to_fail
     .call_target:'''
 
     after_checks = '''\
@@ -613,7 +657,7 @@ def incw_tests():
 def jmp_tests():
     after = '''\
         call save_results
-        bra .to_fail
+        jmp .to_fail
     .ok:'''
 
     test('jmp .ok', after_ins=after)
@@ -784,7 +828,7 @@ def ret_tests():
         push a'''
     after = '''\
         call save_results
-        bra .to_fail
+        jmp .to_fail
     .ok:'''
     test('ret', esp=0xef, p='', ep='', before_regs=before, after_ins=after)
     test('ret', esp=0xef, p='CZIHBPVN', ep='CZIHBPVN', before_regs=before, after_ins=after)
@@ -799,7 +843,7 @@ def ret1_tests():
         push a'''  # last push will be overwritten
     after = '''\
         call save_results
-        bra .to_fail
+        jmp .to_fail
     .ok:'''
     test('ret1', esp=0xef, mem_1ed=flags(''), p='CZIHBPVN', ep='', emem_1ed=None, before_regs=before, after_ins=after)
     test('ret1', esp=0xef, mem_1ed=flags('CZIHBPVN'), p='', ep='CZIHBPVN', emem_1ed=None, before_regs=before, after_ins=after)
@@ -876,83 +920,166 @@ def xcn_tests():
     test('xcn a', a=0xF0, ea=0x0F, p='', ep='')
 
 
+def run_group(name, func, undocumented=False):
+    '''Run a test generator function as a named group (one checkbox in the menu).'''
+    global current_group
+    current_group = dict(index=len(GROUPS), name=name, first=test_num, count=0, undocumented=undocumented)
+    GROUPS.append(current_group)
+    spc_code.clear()
+    func()
+    current_group['count'] = test_num - current_group['first']
+    assert current_group['count'] > 0, name
+    current_group['code'] = '\n'.join(spc_code)
+
+
 def add_all_tests():
-    adc_tests()
-    addw_tests()
-    and_tests()
-    and1_tests()
-    asl_tests()
-    bbc_tests()
-    bbs_tests()
-    branch_tests()
-    brk_tests()
-    call_tests()  # also PCALL and TCALL
-    cbne_tests()
-    clr1_tests()
-    flag_manip_tests()
-    cmp_tests()
-    cmpw_tests()
-    dbnz_tests()
-    dec_tests()
-    decw_tests()
-    eor_tests()
-    eor1_tests()
-    inc_tests()
-    incw_tests()
-    jmp_tests()
-    lsr_tests()
-    mov_tests()
-    mov1_tests()
-    movw_tests()
-    mul_tests()
-    nop_tests()
-    not1_tests()
-    or_tests()
-    or1_tests()
-    pop_tests()
-    push_tests()
-    ret_tests()
-    ret1_tests()
-    rol_tests()
-    ror_tests()
-    sbc_tests()
-    set1_tests()
-    subw_tests()
-    tclr1_tests()
-    tset1_tests()
-    xcn_tests()
+    run_group('ADC', adc_tests)
+    run_group('ADDW', addw_tests)
+    run_group('AND', and_tests)
+    run_group('AND1', and1_tests)
+    run_group('ASL', asl_tests)
+    run_group('BBC', bbc_tests)
+    run_group('BBS', bbs_tests)
+    run_group('Branches', branch_tests)
+    run_group('BRK', brk_tests)
+    run_group('CALL / PCALL / TCALL', call_tests)
+    run_group('CBNE', cbne_tests)
+    run_group('CLR1', clr1_tests)
+    run_group('Flag manipulation', flag_manip_tests)
+    run_group('CMP', cmp_tests)
+    run_group('CMPW', cmpw_tests)
+    run_group('DBNZ', dbnz_tests)
+    run_group('DEC', dec_tests)
+    run_group('DECW', decw_tests)
+    run_group('EOR', eor_tests)
+    run_group('EOR1', eor1_tests)
+    run_group('INC', inc_tests)
+    run_group('INCW', incw_tests)
+    run_group('JMP', jmp_tests)
+    run_group('LSR', lsr_tests)
+    run_group('MOV', mov_tests)
+    run_group('MOV1', mov1_tests)
+    run_group('MOVW', movw_tests)
+    run_group('MUL', mul_tests)
+    run_group('NOP', nop_tests)
+    run_group('NOT1', not1_tests)
+    run_group('OR', or_tests)
+    run_group('OR1', or1_tests)
+    run_group('POP', pop_tests)
+    run_group('PUSH', push_tests)
+    run_group('RET', ret_tests)
+    run_group('RET1', ret1_tests)
+    run_group('ROL', rol_tests)
+    run_group('ROR', ror_tests)
+    run_group('SBC', sbc_tests)
+    run_group('SET1', set1_tests)
+    run_group('SUBW', subw_tests)
+    run_group('TCLR1', tclr1_tests)
+    run_group('TSET1', tset1_tests)
+    run_group('XCN', xcn_tests)
 
     # Leave daa/das/div to the end because some of their behavior is not officially documented
-    daa_tests()
-    das_tests()
-    div_tests()
+    run_group('DAA', daa_tests, undocumented=True)
+    run_group('DAS', das_tests, undocumented=True)
+    run_group('DIV', div_tests, undocumented=True)
 
 
-def start_spc_file():
-    spc_code.clear()
-    spc_code.append('; Auto-generated by make_tests.py\n')
-    spc_code.append('include "spc_common.inc"')
-    spc_code.append('start_tests:\n')
+def pack_files():
+    '''Split the groups into files. A group is never split, so the harness can run any group on its own.'''
+    files = []
+    for g in GROUPS:
+        if not files or (files[-1]['chars'] + len(g['code']) > MAX_FILE_CHARS):
+            files.append(dict(index=len(files), first=g['first'], count=0, chars=0, groups=[]))
+        f = files[-1]
+        f['groups'].append(g)
+        f['count'] += g['count']
+        f['chars'] += len(g['code'])
+        g['file'] = f['index']
+    return files
 
 
-def close_spc_file():
-    global file_num
+def c_string(text):
+    return text.replace('\\', '\\\\').replace('"', '""')
 
-    spc_code.append('''        jmp success''')
-    with open(f'spc_tests{file_num}.asm', 'w') as f:
-        f.write('\n'.join(spc_code) + '\n')
-    file_num += 1
+
+def write_outputs(outdir):
+    os.makedirs(outdir, exist_ok=True)
+
+    def path(name):
+        return os.path.join(outdir, name)
+
+    files = pack_files()
+    for f in files:
+        code = [f'''; Auto-generated by make_tests.py
+file_first = {f['first']}
+include "spc_common.inc"
+start_tests:''']
+        for g in f['groups']:
+            code.append(f"; ---- group {g['index']}: {g['name']}")
+            code.append(g['code'])
+            code.append('        jmp group_done')
+        code.append('test_table:')
+        for t in range(f['first'], f['first'] + f['count']):
+            code.append(f'    dw test{t:04x}')
+        with open(path(f"spc-tests{f['index']}.asm"), 'w') as out:
+            out.write('\n'.join(code) + '\n')
+
+    with open(path('spc-tests.txt'), 'w') as out:
+        out.write('Auto-generated by make_tests.py\n\n' + '\n'.join(tests_txt) + '\n')
+
+    strings = {}
+    for t in TESTS:
+        strings.setdefault(t['ins'], len(strings))
+
+    with open(path('spc-data.inc'), 'w') as out:
+        out.write('; Auto-generated by make_tests.py\n.p816\n')
+        for f in files:
+            i = f['index']
+            out.write(f'.segment "SPC{i}"\nspc{i}: .incbin "spc-tests{i}.spc", $300\nspc{i}_end:\n')
+        out.write('.segment "META_B"\nspc_files:  ; per file: bank(1) addr(2) size(2) first_test(2)\n')
+        for f in files:
+            i = f['index']
+            out.write(f".byte ^spc{i}\n.word .loword(spc{i}), spc{i}_end-spc{i}, {f['first']}\n")
+        out.write('.export spc_files\n')
+
+    with open(path('spc-meta.inc'), 'w') as out:
+        out.write('; Auto-generated by make_tests.py\n.p816\n')
+        out.write(f'SPC_TEST_COUNT = {test_num}\nSPC_GROUP_COUNT = {len(GROUPS)}\nSPC_FILE_COUNT = {len(files)}\n')
+        out.write('.export SPC_TEST_COUNT, SPC_GROUP_COUNT, SPC_FILE_COUNT\n')
+        out.write('.segment "STRINGS"\n')
+        for text, idx in strings.items():
+            out.write(f'spc_str{idx}: .byte "{c_string(text)}", 0\n')
+        for g in GROUPS:
+            out.write(f"spc_gname{g['index']}: .byte \"{c_string(g['name'])}\", 0\n")
+        out.write('.segment "META_B"\n; per test: ins(2) a x y p tags group\nspc_records:\n')
+        for t in TESTS:
+            out.write(f".word .loword(spc_str{strings[t['ins']]})\n.byte ${t['a']:02x}, ${t['x']:02x}, ${t['y']:02x}, "
+                      f"${t['p']:02x}, ${t['tags']:02x}, {t['group']}\n")
+        out.write('; per group: name(2) first(2) count(2) tags(1) file(1)\nspc_groups:\n')
+        for g in GROUPS:
+            out.write(f".word .loword(spc_gname{g['index']}), {g['first']}, {g['count']}\n"
+                      f".byte ${TAG_UNDOCUMENTED if g['undocumented'] else 0:02x}, {g['file']}\n")
+        out.write('.export spc_records, spc_groups\n')
+
+    with open(path('spc-meta.json'), 'w') as out:
+        json.dump(dict(tests=test_num, files=len(files),
+                       groups=[{k: g[k] for k in ('name', 'first', 'count', 'undocumented', 'file')} for g in GROUPS]),
+                  out, indent=1)
+
+
+def generate():
+    tests_txt.append('')
+    add_all_tests()
 
 
 def main():
-    tests_txt.append('Auto-generated by make_tests.py\n')
-
-    start_spc_file()
-    add_all_tests()
-
-    with open('tests.txt', 'w') as f:
-        f.write('\n'.join(tests_txt) + '\n')
-    close_spc_file()
+    if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] in ('-h', '--help')):
+        print(f'Usage:  {sys.argv[0]} [output_dir]')
+        sys.exit(2)
+    outdir = sys.argv[1] if len(sys.argv) == 2 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build')
+    generate()
+    write_outputs(outdir)
 
 
-main()
+if __name__ == '__main__':
+    main()

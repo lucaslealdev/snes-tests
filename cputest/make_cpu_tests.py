@@ -1,17 +1,45 @@
+#!/usr/bin/env python3
+"""Generates the 65C816 test code, plus the metadata tables used by the harness to report failures.
+
+Usage: make_cpu_tests.py [output_dir]      (default output_dir: ../build)
+
+Outputs (all in output_dir):
+  cpu-tests.asm   the test code (several segments: CPUBANK1..CPUBANKn)
+  cpu-tests.txt   human readable description of every test
+  cpu-meta.inc    per-test records, group table, table of test addresses and strings
+  cpu-meta.json   counts used by the other build steps
+"""
 from textwrap import dedent
+import json
+import os
 import re
 import sys
 
 test_num = 0
-bank_num = 0
+bank_num = 1
 tests_in_bank = 0
-basic_tests_only = False
 asm_code = []
 tests_txt = []
 
-# Limit tests per bank to not exceed 32KB. Bank 0 has less room due to other code and data in it.
-TESTS_IN_BANK0 = 230
-TESTS_PER_BANK = 360
+# Records of every test, for the metadata tables and for tools/audit_wram.py
+TESTS = []
+GROUPS = []
+current_group = None
+
+# Limit tests per bank to not exceed 32KB (each test is now followed by inline failure stubs).
+# Bank 0 is only used by the harness, so tests start in bank 1 (segment CPUBANK1).
+TESTS_PER_BANK = 200
+
+# Check kinds. Keep in sync with harness/defs.inc (which is generated from tools/defs.py)
+CHK_CTRL = 0   # a branch/jump went the wrong way
+CHK_X = 1
+CHK_Y = 2
+CHK_P = 3
+CHK_A = 4
+CHK_S = 5
+CHK_DBR = 6
+CHK_D = 7
+CHK_MEM = 8
 
 
 # emulation mode flag (E) is treated as a 9th bit here for convenience
@@ -22,6 +50,13 @@ FLAG_X = 0x10
 FLAG_E = 0x100  # not a real flag
 
 OPCODE_STP = 0xDB
+
+TAG_EMULATION = 0x01
+TAG_UNDOCUMENTED = 0x02
+TAG_DECIMAL = 0x04
+HAS_S = 0x08
+HAS_D = 0x10
+HAS_DBR = 0x20
 
 # Addressing modes
 A_IMM = 0           # #$12 or #$1234
@@ -87,7 +122,7 @@ def flags(p, default=None, add=None):
 
 
 def next_bank_if_needed():
-    if (bank_num == 0 and tests_in_bank == TESTS_IN_BANK0) or (bank_num != 0 and tests_in_bank == TESTS_PER_BANK):
+    if tests_in_bank == TESTS_PER_BANK:
         next_bank()
 
 
@@ -107,19 +142,14 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
     - ins_name will be written instead of the ins in tests.txt if provided. It doesn't
       affect the ROM.
     - comment wil be written to texts.txt.
-    - advanced is true for an advanced test, i.e. for behavior not likely to be used in games.
-      The default (when advanced is None) is that tests with E=1 are considered advanced.
+    - advanced is accepted for compatibility with the legacy generator, but no longer used:
+      the harness filters tests by their tags (E=1, undocumented, decimal) instead.
     '''
 
     global test_num, tests_in_bank
 
     p = flags(p)
     ep = flags(ep, p)
-
-    if advanced is None:
-        advanced = bool(p & FLAG_E)
-    if advanced and basic_tests_only:
-        return
 
     next_bank_if_needed()
 
@@ -155,6 +185,27 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
     # assumption: 16-bit indexes, 8-bit accum
     if comment is not None:
         asm_code.append(f'; {comment}')
+
+    # Every check that can fail gets an inline stub that records its kind and expected value (and the
+    # address, for memory checks) and then jumps to fail_chk, which never returns to the test.
+    # The stub is skipped with a `beq`. (`bne @to_fail` to a shared stub would be out of range.)
+    check_count = 0
+
+    def check(kind, expected, cmp_code, addr=None):
+        nonlocal check_count
+        label = f'@c{check_count}'
+        check_count += 1
+        lines = [cmp_code, f'beq {label}']
+        if kind == CHK_MEM:
+            lines += [f'ldx #${addr & 0xFFFF:04x}', 'stx chk_addr', f'lda #${addr >> 16:02x}', 'sta chk_bank']
+        lines += [f'ldx #${expected:04x}', f'ldy #{kind}', 'jml fail_chk', f'{label}:']
+        add_asm('\n'.join(lines))
+        checks.append((kind, expected, addr))
+
+    checks = []
+    all_text = ''.join(t or '' for t in (before_regs, before_ins, after_ins, after_checks, ins))
+    needs_ctrl_stub = '@to_fail' in all_text
+
     add_asm(f'''\
         test{test_num:04x}:
         .export test{test_num:04x}: far
@@ -205,42 +256,35 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
     add_asm(ins)
     if after_ins:
         add_asm(after_ins)
+    if needs_ctrl_stub:
+        # Target of the `bra @to_fail` in after_ins: the code path that should not be reached.
+        add_asm('''\
+            bra @checks
+            .a8
+            .i16
+        @to_fail:
+            ldx #$0000
+            ldy #0
+            jml fail_chk
+        @checks:''')
     add_asm(f'''\
         jsr bank{bank_num}_save_results ; now X=0, E=0, M=1
         .a8
-        .i16
-        cpx #${ex:04x}
-        bne @to_fail
-        cpy #${ey:04x}
-        bne @to_fail
-        ldx result_p
-        cpx #${ep:04x}
-        bne @to_fail
-        ldx result_a
-        cpx #${ea:04x}
-        bne @to_fail''')
+        .i16''')
+    check(CHK_X, ex, f'cpx #${ex:04x}')
+    check(CHK_Y, ey, f'cpy #${ey:04x}')
+    check(CHK_P, ep, f'ldx result_p\ncpx #${ep:04x}')
+    check(CHK_A, ea, f'ldx result_a\ncpx #${ea:04x}')
     if es is not None:
-        add_asm(f'''\
-            ldx result_s
-            cpx #${es:04x}
-            bne @to_fail''')
+        check(CHK_S, es, f'ldx result_s\ncpx #${es:04x}')
     if edbr is not None:
-        add_asm(f'''\
-            lda result_dbr
-            cmp #${edbr:02x}
-            bne @to_fail''')
+        check(CHK_DBR, edbr, f'lda result_dbr\ncmp #${edbr:02x}')
     if ed is not None:
-        add_asm(f'''\
-            ldx result_d
-            cpx #${ed:04x}
-            bne @to_fail''')
+        check(CHK_D, ed, f'ldx result_d\ncpx #${ed:04x}')
 
     for loc, val in mem_output.items():
         if val is not None:
-            add_asm(f'''\
-                lda ${loc:06x}
-                cmp #${val:02x}
-                bne @to_fail''')
+            check(CHK_MEM, val, f'lda ${loc:06x}\ncmp #${val:02x}', addr=loc)
 
     if es is not None:
         # We expect S to change, so restore the original value now
@@ -251,9 +295,6 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
         add_asm(after_checks)
 
     add_asm('''\
-        bra @next_test
-    @to_fail:
-        jml fail
     @next_test:
     ''')
 
@@ -283,6 +324,18 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
         tests_txt.append('   Additional initialization or checks are performed - see assembly')
     if comment is not None:
         tests_txt.append(f'   Note: {comment}')
+
+    tags = 0
+    if p & FLAG_E:
+        tags |= TAG_EMULATION
+    if comment == UNDOCUMENTED_COMMENT:
+        tags |= TAG_UNDOCUMENTED
+    if current_group['decimal']:
+        tags |= TAG_DECIMAL
+    TESTS.append(dict(num=test_num, group=current_group['index'], ins=(ins_name or ins), a=a, x=x, y=y, p=p,
+                      s=s, d=d, dbr=dbr, tags=tags, checks=checks, mem_input=mem_input, mem_output=mem_output,
+                      code=dict(before_regs=before_regs, before_ins=before_ins, after_ins=after_ins,
+                                after_checks=after_checks, ins=ins)))
 
     test_num += 1
     tests_in_bank += 1
@@ -598,19 +651,18 @@ def brk_cop_tests():
     after = '@ok:'
 
     # Addresses 1000,1004,1008,100C are the BRK/COP handler addresses
-    for ins_name, opcode, native_addr, emul_addr in [('brk', 0x00, 0x1000, 0x1008), ('cop #$DB', 0x02, 0x1004, 0x100C)]:
+    # On further calls the handlers go to the harness (unexpected_*), which records a failure and carries on.
+    # (The legacy ROM wrote an STP opcode here.)
+    for ins_name, opcode, native_addr, emul_addr, handler in [('brk', 0x00, 0x1000, 0x1008, 'brk'),
+                                                              ('cop #$DB', 0x02, 0x1004, 0x100C, 'cop')]:
         before = jml_to_ok_instructions(native_addr)
-        after_checks = f'''\
-            lda #${OPCODE_STP:02x}
-            sta ${native_addr:02x}'''  # stop on further calls
+        after_checks = jml_to_label_instructions(native_addr, f'unexp_{handler}_native')
         test('jml $7e8000', ins_name=ins_name, mem_7e8000=opcode, mem_7e8001=OPCODE_STP, p='DCZ', ep='ICZ',
              es=0x1eb, emem_1ef=0x7e, ememw_1ed=0x8002, emem_1ec=flags('DCZ'),
              before_regs=before, after_ins=after, after_checks=after_checks)
 
         before = jml_to_ok_instructions(emul_addr)
-        after_checks = f'''\
-            lda #${OPCODE_STP:02x}
-            sta ${emul_addr:02x}'''  # stop on further calls
+        after_checks = jml_to_label_instructions(emul_addr, f'unexp_{handler}_emu')
         # E=1: Don't push pbr, stack writes wrap in page 1
         test('jml $7e8000', ins_name=ins_name, mem_7e8000=opcode, mem_7e8001=OPCODE_STP, p='DCZE', ep='ICZMXE',
              s=0x100, es=0x1fd, emem_1ff=0x02, emem_100=0x80, emem_1fe=flags('DCZMX'),
@@ -1179,51 +1231,61 @@ def additional_tests():
          mem_7effff=OPCODE_NOP)
 
 
+def run_group(name, func, decimal=False):
+    '''Run a test generator function as a named group (one checkbox in the menu).'''
+    global current_group
+    current_group = dict(index=len(GROUPS), name=name, first=test_num, count=0, decimal=decimal)
+    GROUPS.append(current_group)
+    func()
+    current_group['count'] = test_num - current_group['first']
+    assert current_group['count'] > 0, name
+
+
 # CZIDXMVN
 def add_all_tests():
-    additional_tests()
-    adc_binary_tests()
-    and_tests()
-    asl_tests()
-    bit_tests()
-    branch_tests()
-    brk_cop_tests()
-    brl_tests()
-    clear_set_tests()
-    cmp_tests()
-    dec_tests()
-    eor_tests()
-    inc_tests()
-    jmp_tests()
-    jsr_tests()
-    ld_tests()
-    lsr_tests()
-    mvn_tests()
-    mvp_tests()
-    ora_tests()
-    nop_wdm_tests()
-    pea_tests()
-    pei_tests()
-    per_tests()
-    pull_axy_tests()
-    pull_misc_tests()
-    push_tests()
-    rep_set_tests()
-    rol_tests()
-    ror_tests()
-    rts_rtl_rti_tests()
-    sbc_binary_tests()
-    st_tests()
-    trb_tests()
-    tsb_tests()
-    transfer_axy_tests()
-    transfer_misc_tests()
-    xba_tests()
-    xce_tests()
+    run_group('PC wrapping', additional_tests)
+    run_group('ADC (binary)', adc_binary_tests)
+    run_group('AND', and_tests)
+    run_group('ASL', asl_tests)
+    run_group('BIT', bit_tests)
+    run_group('Branches', branch_tests)
+    run_group('BRK / COP', brk_cop_tests)
+    run_group('BRL', brl_tests)
+    run_group('Flag set/clear', clear_set_tests)
+    run_group('CMP / CPX / CPY', cmp_tests)
+    run_group('DEC / DEX / DEY', dec_tests)
+    run_group('EOR', eor_tests)
+    run_group('INC / INX / INY', inc_tests)
+    run_group('JMP / JML', jmp_tests)
+    run_group('JSR / JSL', jsr_tests)
+    run_group('LDA / LDX / LDY', ld_tests)
+    run_group('LSR', lsr_tests)
+    run_group('MVN', mvn_tests)
+    run_group('MVP', mvp_tests)
+    run_group('ORA', ora_tests)
+    run_group('NOP / WDM', nop_wdm_tests)
+    run_group('PEA', pea_tests)
+    run_group('PEI', pei_tests)
+    run_group('PER', per_tests)
+    run_group('PLA / PLX / PLY', pull_axy_tests)
+    run_group('PLB / PLD / PLP', pull_misc_tests)
+    run_group('Push (PHx)', push_tests)
+    run_group('REP / SEP', rep_set_tests)
+    run_group('ROL', rol_tests)
+    run_group('ROR', ror_tests)
+    run_group('RTS / RTL / RTI', rts_rtl_rti_tests)
+    run_group('SBC (binary)', sbc_binary_tests)
+    run_group('STA / STX / STY / STZ', st_tests)
+    run_group('TRB', trb_tests)
+    run_group('TSB', tsb_tests)
+    run_group('TAX TAY TXA TYA TXY TYX', transfer_axy_tests)
+    run_group('TSX TSC TXS TCS TCD TDC', transfer_misc_tests)
+    run_group('XBA', xba_tests)
+    run_group('XCE', xce_tests)
 
     # Do decimal tests at end because the behavior is partially undocumented
-    adc_decimal_tests()
-    sbc_decimal_tests()
+    run_group('ADC (decimal)', adc_decimal_tests, decimal=True)
+    run_group('SBC (decimal)', sbc_decimal_tests, decimal=True)
 
 
 def init_bank():
@@ -1262,53 +1324,101 @@ def next_bank():
     add_asm(f'''\
         jml test{test_num:04x}
 
-    .segment "BANK{bank_num}"
+    .segment "CPUBANK{bank_num}"
     ''')
     init_bank()
 
 
-def write_table(suffix):
-    with open(f'tests_table{suffix}.inc', 'w') as f:
-        for i in range(test_num):
+def c_string(text):
+    return text.replace('\\', '\\\\').replace('"', '""')
+
+
+def write_outputs(outdir):
+    n = test_num
+    os.makedirs(outdir, exist_ok=True)
+
+    def path(name):
+        return os.path.join(outdir, name)
+
+    with open(path('cpu-tests.txt'), 'w') as f:
+        f.write('\n'.join(tests_txt) + '\n')
+
+    with open(path('cpu-tests.asm'), 'w') as f:
+        f.write('\n'.join(asm_code) + '\n')
+
+    # String table, without repetitions
+    strings = {}
+    for t in TESTS:
+        strings.setdefault(t['ins'], len(strings))
+    group_names = [g['name'] for g in GROUPS]
+
+    with open(path('cpu-meta.inc'), 'w') as f:
+        f.write('; Auto-generated by make_cpu_tests.py\n.p816\n')
+        f.write(f'CPU_TEST_COUNT = {n}\n')
+        f.write(f'CPU_GROUP_COUNT = {len(GROUPS)}\n')
+        f.write('.export CPU_TEST_COUNT, CPU_GROUP_COUNT\n')
+        f.write('.segment "STRINGS"\n')
+        for text, idx in strings.items():
+            f.write(f'cpu_str{idx}: .byte "{c_string(text)}", 0\n')
+        for i, name in enumerate(group_names):
+            f.write(f'cpu_gname{i}: .byte "{c_string(name)}", 0\n')
+        f.write('.segment "META_CPU"\n')
+        f.write('; per test: ins(2) a(2) x(2) y(2) p(1) tags(1) s(2) d(2) dbr(1) group(1)\n')
+        f.write('cpu_records:\n')
+        for t in TESTS:
+            tags = t['tags'] | (HAS_S if t['s'] is not None else 0) | (HAS_D if t['d'] is not None else 0) \
+                | (HAS_DBR if t['dbr'] is not None else 0)
+            f.write(f".word .loword(cpu_str{strings[t['ins']]}), ${t['a']:04x}, ${t['x']:04x}, ${t['y']:04x}\n")
+            f.write(f".byte ${t['p'] & 0xFF:02x}, ${tags:02x}\n")
+            f.write(f".word ${(t['s'] or 0):04x}, ${(t['d'] or 0):04x}\n")
+            f.write(f".byte ${(t['dbr'] or 0):02x}, {t['group']}\n")
+        f.write('.segment "META_B"\n')
+        f.write('; per group: name(2) first(2) count(2) tags(1) pad(1)\n')
+        f.write('cpu_groups:\n')
+        for g in GROUPS:
+            f.write(f".word .loword(cpu_gname{g['index']}), {g['first']}, {g['count']}\n")
+            f.write(f".byte ${TAG_DECIMAL if g['decimal'] else 0:02x}, 0\n")
+        for i in range(n):
+            f.write(f'.import test{i:04x}: far\n')
+        f.write('cpu_table:  ; far address of every test\n')
+        for i in range(n):
             f.write(f'.faraddr test{i:04x}\n')
+        f.write('.export cpu_records, cpu_groups, cpu_table\n')
+
+    with open(path('cpu-meta.json'), 'w') as f:
+        json.dump(dict(tests=n, groups=[{k: g[k] for k in ('name', 'first', 'count', 'decimal')} for g in GROUPS],
+                       banks=bank_num, tests_per_bank=TESTS_PER_BANK), f, indent=1)
 
 
-def handle_cmdline():
-    global basic_tests_only
+def generate():
+    tests_txt.append('Auto-generated by make_cpu_tests.py\n')
+    asm_code.append('''\
+; Auto-generated by make_cpu_tests.py
+.p816
+.i16
+.a8
+.import init_test: far
+.import fail_chk: far
+.import save_results: far
+.import cpu_done: far
+.import unexp_brk_native: far, unexp_cop_native: far, unexp_brk_emu: far, unexp_cop_emu: far
+.importzp result_a, result_x, result_y, result_p, result_s, result_d, result_dbr, retaddr, chk_addr, chk_bank
 
-    for arg in sys.argv[1:]:
-        if arg in ('-h', '--help'):
-            print(f'Usage:  {sys.argv[0]} [--basic]')
-            print()
-            print('--basic:  Generate basic tests only')
-            sys.exit(2)
-        elif arg == '--basic':
-            basic_tests_only = True
-        else:
-            print('Unknown command line argument')
-            sys.exit(2)
+.segment "CPUBANK1"
+''')
+    init_bank()
+    add_all_tests()
+    add_asm('jml cpu_done')
 
 
 def main():
-    handle_cmdline()
-
-    tests_txt.append('Auto-generated by make_cpu_tests.py\n')
-
-    asm_code.append('; Auto-generated by make_cpu_tests.py\n')
-    init_bank()
-    add_asm('start_tests:\n')
-
-    add_all_tests()
-
-    suffix = '-basic' if basic_tests_only else '-full'
-    with open(f'tests{suffix}.txt', 'w') as f:
-        f.write('\n'.join(tests_txt) + '\n')
-
-    add_asm('jml success')
-    with open(f'tests{suffix}.inc', 'w') as f:
-        f.write('\n'.join(asm_code) + '\n')
-
-    write_table(suffix)
+    if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] in ('-h', '--help')):
+        print(f'Usage:  {sys.argv[0]} [output_dir]')
+        sys.exit(2)
+    outdir = sys.argv[1] if len(sys.argv) == 2 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build')
+    generate()
+    write_outputs(outdir)
 
 
-main()
+if __name__ == '__main__':
+    main()
