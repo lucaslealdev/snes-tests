@@ -104,6 +104,7 @@ local function collect_failures()
     e.spc = e.kind >= 0x80
     e.chk = e.kind & 0x7F
     e.name = string.format("%s #%04X", e.spc and "SPC" or "CPU", e.test)
+    if e.chk == 13 then e.name = "SPC unresponsive" end
     list[#list + 1] = e
   end
   return list
@@ -116,6 +117,7 @@ local function load_expected()
   for line in fh:lines() do
     local kind, num = line:match("^%s*(%a+)%s*#(%x+)")
     if kind then set[string.format("%s #%04X", kind, tonumber(num, 16))] = true end
+    if line:match("^%s*SPC unresponsive") then set["SPC unresponsive"] = true end
   end
   fh:close()
   return set

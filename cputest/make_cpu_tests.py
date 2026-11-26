@@ -25,10 +25,16 @@ tests_txt = []
 TESTS = []
 GROUPS = []
 current_group = None
+PLANTED = {}   # kind of sabotage -> test number, for --plant
 
 # Limit tests per bank to not exceed 32KB (each test is now followed by inline failure stubs).
 # Bank 0 is only used by the harness, so tests start in bank 1 (segment CPUBANK1).
 TESTS_PER_BANK = 200
+
+# Debug build (--plant): a few tests are sabotaged on purpose, to test the harness and the report.
+# test number -> kind of sabotage. See tools/debug-expected.txt for the failures that this must produce.
+PLANT = False
+PLANT_CPU = {0x28: 'wrong_a', 0xea: 'flip_c', 0x12c: 'wrong_p', 0x320: 'hang', 0x4b0: 'brk', 0x3e8: 'wrong_mem'}
 
 # Check kinds. Keep in sync with harness/defs.inc (which is generated from tools/defs.py)
 CHK_CTRL = 0   # a branch/jump went the wrong way
@@ -148,7 +154,11 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
 
     global test_num, tests_in_bank
 
+    orig_ins = ins_name or ins
+    plant = PLANT_CPU.get(test_num) if PLANT else None
     p = flags(p)
+    if plant == 'flip_c':
+        p ^= 1      # the branch that must not be taken is taken
     ep = flags(ep, p)
 
     next_bank_if_needed()
@@ -181,6 +191,22 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
             mem_output[addr + 1] = v >> 8
         else:
             assert False, 'Invalid keyword: ' + k
+
+    if PLANT and plant is None and test_num >= 0x3e8 and 'wrong_mem' not in PLANTED and mem_output:
+        plant = 'wrong_mem'    # the first test with a memory check from 0x3e8 on
+    if plant == 'wrong_a':
+        ea = (ea + 1) & 0xFFFF
+    elif plant == 'wrong_p':
+        ep ^= 0x02
+    elif plant == 'wrong_mem':
+        loc = next(l for l, v in mem_output.items() if v is not None)
+        mem_output[loc] = (mem_output[loc] + 1) & 0xFF
+    elif plant == 'hang':
+        ins = '@hang: bra @hang'
+    elif plant == 'brk':
+        ins = 'brk'
+    if plant:
+        PLANTED[plant] = test_num
 
     # assumption: 16-bit indexes, 8-bit accum
     if comment is not None:
@@ -332,7 +358,7 @@ def test(ins, a=0x1234, x=0x3456, y=0x5678, p=None, ea=None, ex=None, ey=None, e
         tags |= TAG_UNDOCUMENTED
     if current_group['decimal']:
         tags |= TAG_DECIMAL
-    TESTS.append(dict(num=test_num, group=current_group['index'], ins=(ins_name or ins), a=a, x=x, y=y, p=p,
+    TESTS.append(dict(num=test_num, group=current_group['index'], ins=orig_ins, a=a, x=x, y=y, p=p,
                       s=s, d=d, dbr=dbr, tags=tags, checks=checks, mem_input=mem_input, mem_output=mem_output,
                       code=dict(before_regs=before_regs, before_ins=before_ins, after_ins=after_ins,
                                 after_checks=after_checks, ins=ins)))
@@ -1412,12 +1438,22 @@ def generate():
 
 
 def main():
-    if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] in ('-h', '--help')):
-        print(f'Usage:  {sys.argv[0]} [output_dir]')
+    global PLANT
+    args = sys.argv[1:]
+    if '--plant' in args:
+        PLANT = True
+        args.remove('--plant')
+    if len(args) > 1 or (args and args[0] in ('-h', '--help')):
+        print(f'Usage:  {sys.argv[0]} [--plant] [output_dir]')
+        print('--plant: sabotage a few tests (debug build to test the harness)')
         sys.exit(2)
-    outdir = sys.argv[1] if len(sys.argv) == 2 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build')
+    outdir = args[0] if args else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build')
     generate()
     write_outputs(outdir)
+    if PLANT:
+        with open(os.path.join(outdir, 'cpu-planted.txt'), 'w') as f:
+            for kind, num in sorted(PLANTED.items(), key=lambda kv: kv[1]):
+                f.write(f'CPU #{num:04X} {kind}\n')
 
 
 if __name__ == '__main__':

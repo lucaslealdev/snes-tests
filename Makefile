@@ -6,6 +6,8 @@ PYTHON ?= python3
 CA65 ?= ca65
 LD65 ?= ld65
 SPCASM ?= spcasm
+# `make debug` builds a ROM with sabotaged tests in build-debug/ (PLANT=--plant)
+PLANT ?=
 
 # Everything that changes the harness
 HARNESS_SRC := $(wildcard harness/*.asm harness/*.inc)
@@ -13,7 +15,7 @@ HARNESS_SRC := $(wildcard harness/*.asm harness/*.inc)
 OBJS := $(BUILD)/harness.o $(BUILD)/cpu-tests.o $(BUILD)/cpu-meta.o $(BUILD)/spc-meta.o $(BUILD)/spc-data.o \
         $(BUILD)/assets.o
 
-.PHONY: all package clean check
+.PHONY: all package clean check debug
 
 all: snes-tests.sfc
 
@@ -25,13 +27,13 @@ $(BUILD):
 
 # --- Generators. Each writes several files, so a stamp file represents them.
 $(BUILD)/cpu.stamp: cputest/make_cpu_tests.py | $(BUILD)
-	$(PYTHON) cputest/make_cpu_tests.py $(BUILD)
+	$(PYTHON) cputest/make_cpu_tests.py $(PLANT) $(BUILD)
 	touch $@
 
 # The number of SPC files is decided by the generator, so the files are assembled by a loop.
 $(BUILD)/spc.stamp: spctest/make_tests.py spctest/spc_common.inc | $(BUILD)
 	rm -f $(BUILD)/spc-tests*.asm $(BUILD)/spc-tests*.spc
-	$(PYTHON) spctest/make_tests.py $(BUILD)
+	$(PYTHON) spctest/make_tests.py $(PLANT) $(BUILD)
 	cp spctest/spc_common.inc $(BUILD)/
 	set -e; for f in $(BUILD)/spc-tests*.asm; do \
 	    $(SPCASM) -f plain $$f $${f%.asm}.spc; \
@@ -69,6 +71,10 @@ $(BUILD)/assets.o: $(BUILD)/assets.stamp
 $(BUILD)/snes-tests.sfc: $(OBJS) $(BUILD)/snes-tests.cfg
 	$(LD65) -C $(BUILD)/snes-tests.cfg -o $@ $(OBJS) -m $(BUILD)/snes-tests.map -Ln $(BUILD)/snes-tests.lbl -vm
 
+# Debug ROM with planted failures: build-debug/snes-tests.sfc. tools/test_debug_build.sh runs it and checks the report.
+debug:
+	$(MAKE) BUILD=build-debug PLANT=--plant build-debug/snes-tests.sfc
+
 # --- Tests of the generators and tables (no emulator needed)
 check: $(BUILD)/cpu.stamp $(BUILD)/spc.stamp
 	$(PYTHON) tools/audit_wram.py
@@ -79,5 +85,5 @@ package: all
 	zip -j snes-tests.zip snes-tests.sfc README.md LICENSE
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) build-debug
 	rm -f snes-tests.sfc snes-tests.zip

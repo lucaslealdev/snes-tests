@@ -27,6 +27,11 @@ TESTS = []
 GROUPS = []
 current_group = None
 
+# Debug build (--plant): a few tests are sabotaged on purpose, to test the harness and the report.
+PLANT = False
+PLANT_SPC = {0x64: 'wrong_a', 0x258: 'hang_ipl'}   # plus 'dead' on the third to last test (see run_group)
+PLANTED = {}
+
 # Check kinds. Keep in sync with cputest/make_cpu_tests.py and tools/defs.py
 CHK_CTRL = 0   # a branch/jump went the wrong way
 CHK_X = 1
@@ -86,6 +91,10 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
     '''
     global test_num
 
+    orig_ins = ins
+    plant = PLANT_SPC.get(test_num) if PLANT else None
+    if PLANT and test_num == 1365:
+        plant = 'dead'
     p = flags(p)
     ep = flags(ep, p)
     if ea is None:
@@ -105,6 +114,15 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
         else:
             assert False, 'Invalid keyword: ' + k
 
+    if plant == 'wrong_a':
+        ea = (ea + 1) & 0xFF
+    elif plant == 'hang_ipl':
+        # the test returns to the IPL ROM: to the main CPU, the test never finishes, but the IPL answers
+        ins = 'mov $f1, #$80\n        jmp $ffc0'
+    elif plant == 'dead':
+        ins = '.dead: bra .dead'     # the SPC never answers again
+    if plant:
+        PLANTED[plant] = test_num
     spc_code.append(f'''test{test_num:04x}:
         mov a, #${(test_num & 0xFF):02x}
         mov y, #${(test_num >> 8):02x}
@@ -196,7 +214,7 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
     if before_regs or before_ins or after_ins or after_checks:
         tests_txt.append('   Additional initialization or checks are performed - see assembly')
 
-    TESTS.append(dict(num=test_num, group=current_group['index'], ins=ins, a=a, x=x, y=y, p=p,
+    TESTS.append(dict(num=test_num, group=current_group['index'], ins=orig_ins, a=a, x=x, y=y, p=p,
                       tags=TAG_UNDOCUMENTED if current_group['undocumented'] else 0, checks=checks,
                       mem_input=mem_input, mem_output=mem_output))
     test_num += 1
@@ -1073,12 +1091,22 @@ def generate():
 
 
 def main():
-    if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] in ('-h', '--help')):
-        print(f'Usage:  {sys.argv[0]} [output_dir]')
+    global PLANT
+    args = sys.argv[1:]
+    if '--plant' in args:
+        PLANT = True
+        args.remove('--plant')
+    if len(args) > 1 or (args and args[0] in ('-h', '--help')):
+        print(f'Usage:  {sys.argv[0]} [--plant] [output_dir]')
+        print('--plant: sabotage a few tests (debug build to test the harness)')
         sys.exit(2)
-    outdir = sys.argv[1] if len(sys.argv) == 2 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build')
+    outdir = args[0] if args else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build')
     generate()
     write_outputs(outdir)
+    if PLANT:
+        with open(os.path.join(outdir, 'spc-planted.txt'), 'w') as f:
+            for kind, num in sorted(PLANTED.items(), key=lambda kv: kv[1]):
+                f.write(f'SPC #{num:04X} {kind}\n')
 
 
 if __name__ == '__main__':
