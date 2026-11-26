@@ -238,3 +238,61 @@ automática, e um relatório final em inglês, em linguagem natural, descrevendo
 - **Tamanho dos metadados e stubs:** como o relatório só existe na tela, tudo o que ele descreve
   precisa caber na ROM. Se ficar grande demais, compactar as tabelas (etapa 2.7) ou ampliar a ROM
   para 1 MB ou mais.
+
+---
+
+## Desvios e decisões da implementação
+
+Registro do que foi feito de forma diferente do plano, ou onde o plano não decidia. Nada aqui altera o que um
+teste espera: os veredictos da ROM unificada são os das ROMs antigas (baseline no Mesen2: 0 falhas nas três).
+
+- **Região reservada da WRAM: `$7FA000-$7FDFFF` (16 KB), e não `$7FC000-$7FFFFF`.** A auditoria (etapa 3) mostrou
+  que os testes escrevem em `$7FFEEC-$7FFFFF` (MVN/MVP com wrap de banco, `($34),y` com DBR=$7F, `$7FFFC2`), então o
+  fim da banco `$7F` não serve. Os testes tocam `$7E0000-$7E00FF`, `$7E5000`, `$7E7000`, `$7E8000`,
+  `$7EF000-$7EF003`, `$7EFFC0-$7F0300`, `$7F0FDC-$7F1244`, `$7F7000-$7F7004` e `$7FFEEC-$7FFFFF`, além da pilha, de
+  `$0000-$0300` e de `$1000-$100F`. `tools/audit_wram.py` (estático, com os espelhos do banco 0, pilha,
+  D/DBR/índices, ponteiros indiretos e blocos de MVN/MVP) prova que nenhum teste chega em `$7FA000-$7FDFFF`, nos
+  buffers da UI (`$7E2000-$7E4FFF`) nem nas variáveis do menu (`$0500-$0EFF`). Confirmação dinâmica: o rastreio de
+  escritas na WRAM no Mesen2 com a `cputest-full` antiga (656 endereços) está contido no conjunto previsto pela
+  auditoria e não tem nenhum endereço nessas regiões (`tools/lua/wram_writes.lua`).
+- **Numeração em hexadecimal**, como nas ROMs antigas e nos `tests-*.txt` (`CPU #0123`, `SPC #0412`). A ordem e a
+  quantidade dos testes não mudaram (CPU: 1610, SPC: 1368).
+- **Layout dos bancos** (ROM de 1 MB, LoROM, sem SRAM, `build/snes-tests.cfg` gerado por `tools/gen_cfg.py`): banco 0
+  só com o harness (`TESTS_IN_BANK0` = 0), testes da CPU a partir do banco 1 (200 por banco), depois GFX, STRINGS,
+  META_CPU, META_B e um banco por arquivo `.spc`. O número de bancos e de arquivos `.spc` vem dos geradores.
+- **Tamanho dos metadados**: registro de 16 bytes por teste da CPU e 8 por teste do SPC (o plano estimava ~10), mais
+  uma tabela de strings sem repetição. Tudo cabe em 3 bancos de 32 KB (STRINGS ~11 KB, META_CPU ~26 KB, META_B ~16 KB).
+- **Tela de título**: não há tela separada; o cabeçalho do menu faz esse papel (Título → Menu foi fundido).
+- **Os arquivos `.spc` não dividem grupos**: o gerador fecha o arquivo antes de um grupo que não cabe (limite por
+  caracteres de assembly), em vez de a cada 500 testes. Cada arquivo tem uma tabela de endereços dos testes, o que
+  permite retomar depois de um travamento no meio de um grupo.
+- **Recuperação do SPC travado**: o SPC só volta à IPL se o próprio teste levar até lá (não há como reiniciá-lo pelo
+  65C816). Por isso um travamento "de verdade" (laço infinito) leva ao caminho "SPC unresponsive". O caminho de
+  recuperação por reenvio do `.spc` é exercitado na build de depuração por um teste que pula para a IPL.
+- **Reset durante a fase do SPC** (o plano só tratava a fase da CPU): os testes do SPC que faltavam são contados como
+  "não executados" (mesma entrada "SPC unresponsive") e a execução continua pela CPU.
+- **BRK/COP inesperados**: os handlers em `$1000-$100C` agora fazem `jml` para o harness (antes: `STP`). Os testes de BRK/COP
+  restauravam o `STP` em `after_checks`; agora restauram o `jml` do harness (só limpeza, o que o teste espera não
+  muda). `fail_chk` também reinstala os handlers depois de uma falha.
+- **`advanced=` e `--basic`**: o parâmetro é aceito e ignorado; a tag `emulation` é "E=1" (os dois testes com
+  `advanced=False` e E=1 também entram no filtro de emulação).
+- **Geradores**: o gerador do SPC troca `bra .to_fail` por `jmp .to_fail` no código extra dos testes (o stub
+  compartilhado pode ficar fora do alcance do desvio); o da CPU injeta o stub de `@to_fail` antes das verificações.
+- **Tempo decorrido**: contado pelos quadros em que os laços de espera observam o vblank (o envio dos `.spc` conta);
+  é aproximado se um quadro for perdido.
+- **"Passed"**: testes iniciados menos testes reprovados (um teste travado conta como iniciado e reprovado).
+- **Menu**: o menu começa com as duas categorias expandidas; Select não é usado. O auto-start só roda se houver
+  algo marcado.
+- **Auto-start e reset**: a flag "auto-start já usado" é marcada na primeira entrada do menu após o power-on,
+  então um reset durante a contagem também mostra o menu sem auto-start.
+- **Falhas além de 1000**: só a contagem por grupo (como no plano); o resumo avisa.
+- **Build de depuração** (`make debug`, `--plant`): CPU: valor errado em A (#0028), verificação de P (#012C),
+  desvio errado (#00EA), travamento (#0320), BRK inesperado (#04B0), memória (#03E8); SPC: valor errado (#0064), pulo
+  para a IPL (#0258, recuperável) e laço infinito (#0555, não recuperável). Os testes do plano (valor errado,
+  salto errado, trava a CPU, trava o SPC) estão todos aí.
+- **Ferramentas extras**: `tools/check_modes.py` (tamanhos de registrador divergentes entre um desvio e o rótulo
+  de destino no ca65: um bug desse tipo apareceu e foi pego), `tools/test_menu.sh`, `tools/lua/test_reset.lua`.
+- **Mesen2 2.2.1 (testrunner)**: `emu.log()` não imprime no testrunner (usar `print`); `emu.reset()` preserva a
+  WRAM; o estado do runner sobrevive ao reset (verificado). Nada disso foi verificado em hardware real.
+- **Release `legacy-v1`**: a tag existe localmente; a release no GitHub (com as 3 ROMs) não foi criada, nem nada foi
+  enviado ao remoto. O CI (`.github/workflows/build.yml`) foi escrito mas não foi executado no GitHub.
