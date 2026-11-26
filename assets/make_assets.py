@@ -118,7 +118,8 @@ def main():
     }
     for p, c in text_colors.items():
         pal[p * 16 + 1] = c
-    pal[1], pal[2], pal[3] = text_colors[1], text_colors[3], text_colors[2]  # BG3 palette 0
+    # BG3 (2bpp) palettes 0..3 use CGRAM 1, 5, 9, 13: normal, accent (cursor), dim, warning (harness/text.asm)
+    pal[1], pal[5], pal[9], pal[13] = text_colors[1], text_colors[3], text_colors[2], text_colors[6]
     pal[128 + 1] = rgb(248, 224, 96)  # cursor sprite
     palette = b''.join(c.to_bytes(2, 'little') for c in pal)
 
