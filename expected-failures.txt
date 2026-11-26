@@ -1,0 +1,4 @@
+# Failures expected when running snes-tests.sfc in Mesen2 (headless).
+# One per line: "CPU #NNNN" or "SPC #NNNN" (decimal test number), optionally followed by a comment.
+# Baseline (Etapa 0): the legacy ROMs cputest-full, cputest-basic and spctest pass 100% in Mesen2 2.2.1
+# (0 failures), so this list is empty.
