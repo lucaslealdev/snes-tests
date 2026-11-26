@@ -34,6 +34,8 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 RESERVED = (0x1A000, 0x1DFFF)
 # The UI shadow buffers of the harness ($7E2000-$7E4FFF) are only used by the menu and must not be touched either.
 UI_AREA = (0x02000, 0x04FFF)
+# Variables of the menu/report (segment BSS, tools/gen_cfg.py)
+BSS_AREA = (0x00500, 0x00EFF)
 
 FLAG_X = 0x10
 FLAG_E = 0x100
@@ -241,7 +243,8 @@ def main():
             if off is None:
                 continue
             touched.setdefault(off, t['num'])
-    for (lo, hi), name in ((RESERVED, 'reserved runner state'), (UI_AREA, 'UI shadow buffers')):
+    for (lo, hi), name in ((RESERVED, 'reserved runner state'), (UI_AREA, 'UI shadow buffers'),
+                           (BSS_AREA, 'menu/report variables')):
         bad = sorted(o for o in touched if lo <= o <= hi)
         for o in bad[:10]:
             errors.append(f'CPU #{touched[o]:04x} touches WRAM offset ${o:05x} ({name})')
@@ -266,7 +269,7 @@ def main():
         for e in errors:
             print('  ' + e)
         sys.exit(1)
-    print('AUDIT OK: no test touches the reserved WRAM range or the UI shadow buffers.')
+    print('AUDIT OK: no test touches the reserved WRAM range, the UI shadow buffers or the menu/report variables.')
 
 
 if __name__ == '__main__':

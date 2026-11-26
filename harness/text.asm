@@ -140,6 +140,25 @@ txt_putsf:
 	sta tptr+2
 	jmp txt_puts
 
+; Prints at most A characters of a string from the STRINGS bank (X = address)
+txt_putsf_n:
+	sta tcount
+	stx tptr
+	lda #^strings_marker
+	sta tptr+2
+	ldy #0
+@loop:
+	tya
+	cmp tcount
+	bcs @end
+	lda [tptr],y
+	beq @end
+	jsr txt_putc
+	iny
+	bra @loop
+@end:
+	rts
+
 ; Prints A (count) copies of the tile X (low byte)
 txt_fill:
 	sta tcount
@@ -367,9 +386,7 @@ wrap_putc:
 	lda wcol
 	cmp wrap_x1
 	bcc @ok
-	phy
 	jsr wrap_newline
-	ply
 @ok:
 	pla
 	jsr txt_putc
@@ -377,6 +394,8 @@ wrap_putc:
 	rts
 
 wrap_newline:
+	phx
+	phy
 	lda wrap_x0
 	sta wcol
 	inc wrow
@@ -389,4 +408,7 @@ wrap_newline:
 	tay
 	A8
 	lda #0
-	jmp txt_at
+	jsr txt_at
+	ply
+	plx
+	rts

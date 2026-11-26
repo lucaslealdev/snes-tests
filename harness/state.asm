@@ -254,8 +254,12 @@ add_failure:
 	A8
 	sta f_group
 	stz f_group+1
-	; count the failure
+	; count the failure (CHK_UNRESP is not a failed test: it only says that tests were not run)
 	AXY16
+	lda f_kind
+	and #$007F
+	cmp #CHK_UNRESP
+	beq @store
 	lda f_group
 	asl a
 	tax

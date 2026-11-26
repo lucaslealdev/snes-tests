@@ -42,3 +42,26 @@
 	lda #$01
 	sta $420B
 .endmacro
+
+; Long branches (the target is out of the range of a relative branch). They use anonymous labels, which don't
+; end the scope of the cheap local labels (@name).
+.macro jeq lbl
+	bne :+
+	jmp lbl
+:
+.endmacro
+.macro jne lbl
+	beq :+
+	jmp lbl
+:
+.endmacro
+.macro jcs lbl
+	bcc :+
+	jmp lbl
+:
+.endmacro
+.macro jcc lbl
+	bcs :+
+	jmp lbl
+:
+.endmacro
