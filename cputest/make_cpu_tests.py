@@ -1267,8 +1267,8 @@ def next_bank():
     init_bank()
 
 
-def write_table():
-    with open('tests_table.inc', 'w') as f:
+def write_table(suffix):
+    with open(f'tests_table{suffix}.inc', 'w') as f:
         for i in range(test_num):
             f.write(f'.faraddr test{i:04x}\n')
 
@@ -1308,7 +1308,7 @@ def main():
     with open(f'tests{suffix}.inc', 'w') as f:
         f.write('\n'.join(asm_code) + '\n')
 
-    write_table()
+    write_table(suffix)
 
 
 main()

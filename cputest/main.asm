@@ -454,7 +454,11 @@ font:
 	.incbin "font.bin"
 
 tests_table:
-	.include "tests_table.inc"
+.ifdef basic
+	.include "tests_table-basic.inc"
+.else
+	.include "tests_table-full.inc"
+.endif
 	.faraddr success
 
 .segment "TEST_DATA"  ; At address FFA0. Used by some tests
