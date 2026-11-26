@@ -23,7 +23,10 @@
 ;                         The test must be in the uploaded file; the SPC finds its code in a table.
 ;       command $2 = EXIT: enable the IPL ROM and jump to it (the SPC is ready for another upload). The SPC also
 ;                          accepts it while it waits for the acknowledgment of a byte (step 5). I1 is set to $FF.
-;    Sequence numbers skip $CC: if the SPC is already in the IPL, $CC in I0 would start an upload there.
+;    Sequence numbers skip $CC: if the SPC is already in the IPL, $CC in I0 would start an upload there. They also
+;    skip 0: the tests of the I/O ports (group "APU I/O ports") clear the inputs with $F1, so the SPC may see a
+;    "command" 0 in cmd_wait (ignored: no RUN/EXIT bits) and then wait for I0 to differ from 0.
+;    The SPC keeps I1/I2 of the last command in cmd_i1/cmd_i2, and those tests compare the ports with them.
 ;
 ; 4. Progress (SPC -> main CPU). While running, the SPC writes the number of the test in progress to O2/O3 (at the
 ;    start of every test). If it doesn't change for SPC_HANG_FRAMES frames and the SPC sends nothing, the main CPU

@@ -1,10 +1,10 @@
 # Text that the report of the debug build (make debug: failures planted on purpose) must show.
 # One fixed string per line, searched in the text read from the screen by tools/lua/run_tests.lua (WALK=1).
-2,967 of 2,978 tests passed.
+2,980 of 2,991 tests passed.
 9 failures in 9 groups: ADC (binary) (1), Branches (1), CMP / CPX / CPY (1), LDA / LDX / LDY (1), Push (PHx) (1), STA / STX / STY / STZ (1), and 3 more
 SPC test #0064 (ADC) - "adc a, [$ff+x]". Inputs: A=$00 X=$02 Y=$56 P=$01. A was $80 but $81 was expected.
 SPC test #0258 (CMP) - "cmp a, [$ff+x]" stopped responding (hang) - the SPC program was reloaded and testing resumed.
-SPC test #0555 (DIV) - "div ya, x" stopped responding (hang) and the SPC-700 could not be recovered. Note: this test covers undocumented behavior.
+SPC test #0562 (DIV) - "div ya, x" stopped responding (hang) and the SPC-700 could not be recovered. Note: this test covers undocumented behavior.
 The SPC-700 stopped responding; 2 SPC tests were not run.
 CPU test #0028 (ADC (binary)) - "adc $12,s" with 8-bit accumulator, 16-bit index registers, native mode. Inputs: A=$1112 X=$3456 Y=$5678 P=$21. A was $1100 but $1101 was expected.
 CPU test #00EA (Branches) - "bcc @not_ok" with 16-bit accumulator, 16-bit index registers, native mode. Inputs: A=$1234 X=$3456 Y=$5678 P=$00. A branch or jump went the wrong way: code that should have been skipped was executed.

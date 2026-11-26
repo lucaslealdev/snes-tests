@@ -29,6 +29,8 @@ fsp: db 0       ; value of SP, for failed SP checks
 fptr: dw 0      ; address of the memory location of failed memory checks
 fret: dw 0      ; return address saved by fail_chk
 ftmp: dw 0
+cmd_i1: db 0     ; I1 and I2 of the last command (read by the tests of the I/O ports)
+cmd_i2: db 0
 
 ; Load RAM from here
 org $300
@@ -55,6 +57,7 @@ cmd_wait:
     movw ya, $f5
     cmpw ya, $f5
     bne .params
+    movw cmd_i1, ya
     mov a, y
     and a, #$F0
     cmp a, #CMD_EXIT

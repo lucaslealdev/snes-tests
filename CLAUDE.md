@@ -127,6 +127,10 @@ do write `$7E0000-$7E00FF`, `$7E5000`, `$7E7000`, `$7E8000`, `$7EF000-$7EF003`, 
 ## Behavior notes
 
 - Neither part tests cycle timing. cputest skips STP/WAI, interrupts and memory-mapped registers; spctest skips
-  SLEEP/STOP, dummy reads, S-SMP registers and the DSP.
+  SLEEP/STOP, dummy reads, the timers and the DSP. Of the S-SMP registers it only tests the I/O ports and the
+  port-clear bits of $F1 (group "APU I/O ports", before daa/das/div). Those tests compare with values known only
+  at run time (`emem_X='<variable of spc_common.inc>'`) and clear the input ports, which the protocol accounts
+  for (see spc_proto.inc). Timing-dependent port behavior (a read during a write) isn't tested: it isn't
+  deterministic, and the original console has it too.
 - A CPU test that hangs can only be recovered by a reset (press RESET; the Lua driver does it for you).
 - The ROM has no SRAM; the state in WRAM does not survive a power cycle.

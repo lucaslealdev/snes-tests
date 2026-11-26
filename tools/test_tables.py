@@ -114,8 +114,15 @@ class CheckTests(unittest.TestCase):
                     self.assertTrue(0 <= expected <= 0xFF and addr is not None and 0 <= addr <= 0xFFFFFF)
                 else:
                     self.assertTrue(0 <= expected <= 0xFFFF, (t['num'], kind, expected))
+        with open(os.path.join(os.path.dirname(__file__), '..', 'spctest', 'spc_common.inc')) as f:
+            spc_vars = set(re.findall(r'^(\w+):', f.read(), re.M))
         for t in SPC.TESTS:
             for kind, expected, addr in t['checks']:
+                if isinstance(expected, str):
+                    # expected value known at run time: only memory checks, against a variable of spc_common.inc
+                    self.assertEqual(kind, SPC.CHK_MEM, t['num'])
+                    self.assertIn(expected, spc_vars, t['num'])
+                    continue
                 self.assertTrue(0 <= expected <= 0xFF)
                 if kind == SPC.CHK_MEM:
                     self.assertTrue(0 <= addr <= 0xFFFF)

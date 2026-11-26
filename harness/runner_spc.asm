@@ -205,15 +205,14 @@ spc_load_file:
 	rts
 
 ; Next command sequence number. $CC is skipped: if the SPC is already in the IPL, $CC in port 0 would start an
-; upload there.
+; upload there. 0 is skipped too: the tests of the I/O ports clear I0, after which the SPC takes 0 as the last
+; command seen, so a command with sequence number 0 would go unnoticed.
 spc_next_seq:
 	inc spc_seq
 	lda spc_seq
+	beq spc_next_seq
 	cmp #$CC
-	bne @ok
-	inc spc_seq
-	lda spc_seq
-@ok:
+	beq spc_next_seq
 	rts
 
 ; EXIT command: the test program enables the IPL ROM and jumps to it. I1 is not used by EXIT; it is set nonzero

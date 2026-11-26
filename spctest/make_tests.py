@@ -29,7 +29,7 @@ current_group = None
 
 # Debug build (--plant): a few tests are sabotaged on purpose, to test the harness and the report.
 PLANT = False
-PLANT_SPC = {0x64: 'wrong_a', 0x258: 'hang_ipl'}   # plus 'dead' on the third to last test (see run_group)
+PLANT_SPC = {0x64: 'wrong_a', 0x258: 'hang_ipl'}   # plus 'dead' on the 5th test of DIV (see test())
 PLANTED = {}
 
 # Check kinds. Keep in sync with cputest/make_cpu_tests.py and tools/defs.py
@@ -79,21 +79,23 @@ def flags(p, default=None, add=None):
 
 
 def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None, esp=None,
-         before_regs=None, before_ins=None, after_ins=None, after_checks=None, **kwargs):
+         before_regs=None, before_ins=None, after_ins=None, after_checks=None, ins_name=None, **kwargs):
     '''Test the given instruction, setting registers/memory before and checking them after.
 
     - a, x, y, p are the input register values
     - e* are the expected output values. If None then they should be the same as input.
     - mem_abcd means this is the input value in memory location $ABCD (or any other).
-    - emem_abcd is the output value.
+    - emem_abcd is the output value. It can also be the name of a variable of spc_common.inc (a string): the
+      expected value is then only known at run time (used by the tests of the I/O ports).
+    - ins_name is shown instead of ins (in the report and tests.txt) when ins is several instructions.
     - before_regs, before_ins, after_ins, after_checks are used to add additional assembly code
       at specific points.
     '''
     global test_num
 
-    orig_ins = ins
+    orig_ins = ins_name or ins
     plant = PLANT_SPC.get(test_num) if PLANT else None
-    if PLANT and test_num == 1365:
+    if PLANT and current_group['name'] == 'DIV' and test_num - current_group['first'] == 4:
         plant = 'dead'
     p = flags(p)
     ep = flags(ep, p)
@@ -163,8 +165,9 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
         spc_code.extend(f'        {line}' for line in cmp_lines)
         spc_code.append(f'        beq {label}')
         spc_code.extend(f'        {line}' for line in extra)
+        y_src = expected if isinstance(expected, str) else f'#${expected:02x}'
         spc_code.append(f'''\
-        mov y, #${expected:02x}
+        mov y, {y_src}
         mov a, #{kind}
         call fail_chk
         jmp .next_test
@@ -180,10 +183,11 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
 
     for loc, val in mem_output.items():
         if val is not None:
+            src = val if isinstance(val, str) else f'#${val:02x}'
             if loc < 0x100:
-                lines = [f'cmp ${loc:02x}, #${val:02x}']
+                lines = [f'cmp ${loc:02x}, {src}']
             else:
-                lines = [f'mov a, ${loc:04x}', f'cmp a, #${val:02x}']
+                lines = [f'mov a, ${loc:04x}', f'cmp a, {src}']
             check(CHK_MEM, val, lines, extra=[f'mov fptr, #${loc & 0xFF:02x}', f'mov fptr+1, #${loc >> 8:02x}'])
             checks[-1] = (CHK_MEM, val, loc)
 
@@ -199,7 +203,7 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
     .next_test:
     ''')
 
-    tests_txt.append(f'Test {test_num:04x}: {ins}')
+    tests_txt.append(f'Test {test_num:04x}: {orig_ins}')
     inputs = f'A=${a:02x} X=${x:02x} Y=${y:02x} P=${p:02x}'
     if mem_input:
         inputs += ' ' + ' '.join(f'(${loc:02x})=${val:02x}' for loc, val in mem_input)
@@ -207,7 +211,8 @@ def test(ins, a=0x12, x=0x34, y=0x56, p=None, ea=None, ex=None, ey=None, ep=None
     if esp is not None:
         outputs += f' SP={esp:02x}'
     if mem_output:
-        outputs += ' ' + ' '.join(f'(${loc:02x})=${val:02x}' for loc, val in mem_output.items() if val is not None)
+        outputs += ' ' + ' '.join(f'(${loc:02x})=' + (f'<{val}>' if isinstance(val, str) else f'${val:02x}')
+                                  for loc, val in mem_output.items() if val is not None)
 
     tests_txt.append(f'   Input: {inputs}')
     tests_txt.append(f'   Expected output: {outputs}')
@@ -938,6 +943,38 @@ def xcn_tests():
     test('xcn a', a=0xF0, ea=0x0F, p='', ep='')
 
 
+def apu_port_tests():
+    # The I/O ports $F4-$F7 are two sets of latches: what the SPC reads is what the main CPU wrote (I0-I3), and
+    # what the SPC writes goes to the main CPU (O0-O3). At test time the SPC knows the inputs: I0 is the sequence
+    # number of the RUN command (last_cmd), I1/I2 its parameters (cmd_i1/cmd_i2, see spc_common.inc), and I3 the
+    # acknowledgment of the last byte sent (txseq). Each test copies a port to $00 with `mov dp, dp`, which
+    # changes no register or flag, and checks it.
+    # O0 is never written here: it is the sequence number of the byte stream, and the main CPU would see a byte.
+    test('mov $00, $f4', mem_00=0x77, emem_00='last_cmd')
+    test('mov $00, $f5', mem_00=0x77, emem_00='cmd_i1')
+    test('mov $00, $f6', mem_00=0x77, emem_00='cmd_i2')
+    test('mov $00, $f7', mem_00=0x77, emem_00='txseq')
+    # Writing an output port doesn't change what the SPC reads from that address. O2/O3 (the test in progress,
+    # read by the main CPU) are restored right after.
+    test('mov $f5, #$a5\n        mov $00, $f5', ins_name='mov $f5, #$a5 / mov $00, $f5',
+         mem_00=0x77, emem_00='cmd_i1')
+    test('mov $f6, #$a6\n        mov $00, $f6', ins_name='mov $f6, #$a6 / mov $00, $f6',
+         after_ins='mov $f6, test_num', mem_00=0x77, emem_00='cmd_i2')
+    test('mov $f7, #$a7\n        mov $00, $f7', ins_name='mov $f7, #$a7 / mov $00, $f7',
+         after_ins='mov $f7, test_num+1', mem_00=0x77, emem_00='txseq')
+    # CONTROL ($F1) without the port clear bits leaves the inputs alone. (Bit 7 = 0 keeps the IPL ROM disabled,
+    # bits 0-2 = 0 keep the timers off, as in spc_common.inc.)
+    test('mov $f1, #$00\n        mov $00, $f5', ins_name='mov $f1, #$00 / mov $00, $f5',
+         mem_00=0x77, emem_00='cmd_i1')
+    # Bit 4 (PC10) clears the inputs I0 and I1, bit 5 (PC32) clears I2 and I3. They stay 0 until the main CPU
+    # writes them again, so these tests are the last ones of the group; the protocol copes with it.
+    test('mov $f1, #$10\n        mov $00, $f4', ins_name='mov $f1, #$10 / mov $00, $f4', mem_00=0x77, emem_00=0)
+    test('mov $00, $f5', mem_00=0x77, emem_00=0)
+    test('mov $00, $f6', mem_00=0x77, emem_00='cmd_i2')    # PC10 doesn't touch I2
+    test('mov $f1, #$20\n        mov $00, $f6', ins_name='mov $f1, #$20 / mov $00, $f6', mem_00=0x77, emem_00=0)
+    test('mov $00, $f7', mem_00=0x77, emem_00=0)
+
+
 def run_group(name, func, undocumented=False):
     '''Run a test generator function as a named group (one checkbox in the menu).'''
     global current_group
@@ -995,6 +1032,8 @@ def add_all_tests():
     run_group('TCLR1', tclr1_tests)
     run_group('TSET1', tset1_tests)
     run_group('XCN', xcn_tests)
+
+    run_group('APU I/O ports', apu_port_tests)
 
     # Leave daa/das/div to the end because some of their behavior is not officially documented
     run_group('DAA', daa_tests, undocumented=True)
