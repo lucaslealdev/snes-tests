@@ -1,0 +1,42 @@
+# Builds snes-tests.sfc, runs the checks and the ROM in Mesen2 (headless), and publishes the ROM as an artifact.
+# NOTE: written together with the rewrite but not run on GitHub yet. Check the URL of the Mesen2 release.
+name: build
+on: [push, pull_request]
+
+env:
+  # Mesen2 (MesenCE) release with the Linux build, used with --testrunner (no display needed)
+  MESEN_URL: https://github.com/nesdev-org/MesenCE/releases/download/2.2.1/Mesen_2.2.1_Linux_x64_AoT.zip
+  SPCASM_VERSION: 2.0.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cc65, zip
+        run: sudo apt-get update && sudo apt-get install -y cc65 zip unzip
+      - name: Install spcasm
+        run: cargo install spcasm --version $SPCASM_VERSION --locked
+      - name: Build
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          make
+          make check
+          make package
+      - name: Install Mesen2
+        run: tools/setup_mesen.sh "$MESEN_URL" "$HOME/mesen"
+      - name: Run the ROM in Mesen2 and compare the failures with expected-failures.txt
+        run: |
+          export MESEN="$HOME/mesen/Mesen"
+          tools/run_mesen.sh
+      - name: Tests of the menu and of the report (debug build with planted failures)
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH" MESEN="$HOME/mesen/Mesen"
+          tools/test_menu.sh
+          tools/test_debug_build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snes-tests
+          path: |
+            snes-tests.sfc
+            snes-tests.zip

@@ -15,7 +15,7 @@ HARNESS_SRC := $(wildcard harness/*.asm harness/*.inc)
 OBJS := $(BUILD)/harness.o $(BUILD)/cpu-tests.o $(BUILD)/cpu-meta.o $(BUILD)/spc-meta.o $(BUILD)/spc-data.o \
         $(BUILD)/assets.o
 
-.PHONY: all package clean check debug
+.PHONY: all package clean check debug test
 
 all: snes-tests.sfc
 
@@ -78,7 +78,14 @@ debug:
 # --- Tests of the generators and tables (no emulator needed)
 check: $(BUILD)/cpu.stamp $(BUILD)/spc.stamp
 	$(PYTHON) tools/audit_wram.py
+	$(PYTHON) tools/check_modes.py
 	$(PYTHON) -m unittest discover -s tools -p 'test_*.py'
+
+# --- Tests of the ROM in Mesen2 (headless). Set MESEN to the path of the Mesen binary.
+test: all check
+	tools/run_mesen.sh
+	tools/test_menu.sh
+	tools/test_debug_build.sh
 
 package: all
 	rm -f snes-tests.zip

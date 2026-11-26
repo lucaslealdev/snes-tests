@@ -21,6 +21,8 @@ local STALL_FRAMES = tonumber(os.getenv("STALL_FRAMES") or "420")
 local MAX_FRAMES = tonumber(os.getenv("MAX_FRAMES") or "120000")
 local SCREENSHOT = os.getenv("SCREENSHOT")   -- "frame:file,frame:file" to save PNGs of the screen
 local VERBOSE = os.getenv("VERBOSE")
+local SHOT_REPORT = os.getenv("SHOT_REPORT")
+local SHOT_DETAIL = os.getenv("SHOT_DETAIL")
 
 local CHK = { [0] = "ctrl", "X", "Y", "P", "A", "S", "DBR", "D", "MEM", "order", "brk", "cop", "hang", "unresp" }
 
@@ -71,8 +73,8 @@ if SCREENSHOT then
   for fr, file in SCREENSHOT:gmatch("(%d+):([^,]+)") do shots[tonumber(fr)] = file end
 end
 
-local function press(buttons, frames, wait)
-  press_queue[#press_queue + 1] = { b = buttons, n = frames or 2, wait = wait or 6 }
+local function press(buttons, frames, wait, fn)
+  press_queue[#press_queue + 1] = { b = buttons, n = frames or 2, wait = wait or 6, fn = fn }
 end
 
 emu.addEventCallback(function()
@@ -161,7 +163,11 @@ emu.addEventCallback(function()
   if press_now then
     if press_now.n > 0 then press_now.n = press_now.n - 1
     elseif press_now.wait > 0 then press_now.wait = press_now.wait - 1
-    else press_now = nil end
+    else
+      local fn = press_now.fn
+      press_now = nil
+      if fn then fn() end
+    end
   end
   if not press_now and #press_queue > 0 then press_now = table.remove(press_queue, 1) end
 
@@ -200,8 +206,64 @@ emu.addEventCallback(function()
   elseif state == "report" then
     if frame - report_frame < 20 then return end
     local ok = summarize()
+    -- the summary on the screen
+    local sum = table.concat(screen_text(3, 9), " "):gsub("%s+", " ")
+    print("SUMMARY " .. sum)
+    if SHOT_REPORT then
+      local png = emu.takeScreenshot()
+      local fh = io.open(OUT .. "/" .. SHOT_REPORT, "wb")
+      if fh then fh:write(png); fh:close() end
+    end
     if VERBOSE then
       for _, r in ipairs(screen_text(0, 27)) do print("| " .. r) end
+    end
+    local nf = rd16("rsv_fail_count")
+    if os.getenv("WALK") and nf > 0 then
+      if os.getenv("TRACE") then
+        local ring, ri = {}, 0
+        emu.addMemoryCallback(function(addr, val)
+          ri = (ri + 1) % 48
+          ring[ri] = addr
+          if addr == 0x1000 then
+            print(string.format("BRK handler hit. sp=%04X", emu.getState()["cpu.sp"]))
+            local t = {}
+            for i = 47, 0, -1 do
+              local a = ring[(ri - i) % 48]
+              if a then t[#t + 1] = string.format("%04X", a) end
+            end
+            print(table.concat(t, " "))
+            emu.stop(9)
+          end
+        end, emu.callbackType.exec, 0x000000, 0x00FFFF)
+      end
+      -- open the detail of every failure (A), read the text from the screen, go back (B), next (Down)
+      state = "walk"
+      local i = 0
+      local function step()
+        i = i + 1
+        if i > nf then
+          state = "done"
+          if VERBOSE then print("-- failures after the walk:"); summarize() end
+          finish(ok and 0 or 1, ok and "PASS: failures match the expected list" or "FAIL: failures differ from the expected list")
+          return
+        end
+        press({ a = true }, 3, 10, function()
+          local rows = screen_text(3, 24)
+          local text = table.concat(rows, " "):gsub("%s+", " ")
+          print(string.format("DETAIL %d: %s", i, text))
+          if VERBOSE then print(string.format("  state: fail_cpu=%d fail_spc=%d count=%d phase=%d", rd16("rsv_fail_cpu"), rd16("rsv_fail_spc"), rd16("rsv_fail_count"), rd8("rsv_phase"))) end
+          if SHOT_DETAIL and i == tonumber(SHOT_DETAIL) then
+            local png = emu.takeScreenshot()
+            local fh = io.open(OUT .. "/detail.png", "wb")
+            if fh then fh:write(png); fh:close() end
+          end
+          press({ b = true }, 3, 10, function()
+            press({ down = true }, 3, 6, step)
+          end)
+        end)
+      end
+      step()
+      return
     end
     state = "done"
     finish(ok and 0 or 1, ok and "PASS: failures match the expected list" or "FAIL: failures differ from the expected list")
