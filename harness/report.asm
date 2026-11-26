@@ -892,6 +892,34 @@ draw_summary:
 	cmp #0
 	A8
 	bne @some_failed
+	; no failures, but if some SPC tests were not run, "All N tests passed" would be wrong
+	A16
+	lda f:rsv_notrun
+	A8
+	beq @all_passed
+	lda #ST_WARN
+	jsr txt_style
+	jsr mb_init
+	A16
+	lda f:rsv_cpu_done
+	clc
+	adc f:rsv_spc_done
+	jsr mb_dec_commas
+	A8
+	ldx #txt_of
+	jsr mb_str0
+	A16
+	lda f:rsv_cpu_total
+	clc
+	adc f:rsv_spc_total
+	jsr mb_dec_commas
+	A8
+	ldx #txt_tests_passed2
+	jsr mb_str0
+	jsr mb_term
+	jsr r_print_msg
+	jmp @after1
+@all_passed:
 	lda #ST_PASS
 	jsr txt_style
 	jsr mb_init

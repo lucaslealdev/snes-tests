@@ -113,9 +113,16 @@ do write `$7E0000-$7E00FF`, `$7E5000`, `$7E7000`, `$7E8000`, `$7EF000-$7EF003`, 
 - A file only contains whole groups, split by `MAX_FILE_CHARS` so each fits in a 32KB bank; the Makefile
   checks the size. Each file has a table of test addresses, so a run can start at any test (used to continue
   after a hang). The number of files comes from the generator (`spc-meta.inc`), not from any hand-written list.
-- Hangs: the main CPU notices that the test number didn't change for `SPC_HANG_FRAMES`, records it, waits for
-  `$BBAA` (the IPL; the SPC only gets there by itself), uploads the file again and continues; if the IPL doesn't
-  answer, the SPC is "unresponsive" and the remaining SPC tests are counted as not run.
+- Hangs: the main CPU notices that the test number didn't change for `SPC_HANG_FRAMES`, records it, sends EXIT
+  (the SPC obeys it in `cmd_wait` and while waiting for an acknowledgment, not inside a test) and waits for
+  `$BBAA`, uploads the file again and continues; if the IPL doesn't answer, the SPC is "unresponsive" and the
+  remaining SPC tests are counted as not run. A file that can't be uploaded after `SPC_LOAD_TRIES` is skipped
+  (its tests are counted as not run); `SPC_BAD_FILES_MAX` such files in a row make the SPC "unresponsive".
+- Port reads are always confirmed by a second read, on both sides, and every wait of the main CPU has a timeout.
+  This is for clone consoles: with single reads, a port read while the other side wrote it lost a byte of the
+  protocol, both sides waited forever and the SPC was declared unresponsive on two clones, while an original
+  console passed. Mesen doesn't reproduce that race: `tools/test_spc_tolerance.sh` simulates the faults
+  (`INJECT` in `run_tests.lua`) instead. Sequence numbers skip `$CC`, which would start an upload in the IPL.
 
 ## Behavior notes
 

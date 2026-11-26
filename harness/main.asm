@@ -124,6 +124,9 @@ spc_base: .word 0      ; tests done before spc_start
 spc_last: .word 0      ; last progress read from the SPC
 spc_hung: .word 0
 spc_wd: .byte 0
+spc_try: .byte 0       ; attempts left (loading a file, rescuing a hung SPC)
+spc_badfiles: .byte 0  ; files in a row that couldn't be loaded
+spc_skipf: .byte 0     ; file whose groups are being skipped
 rx_seq: .byte 0
 rx_state: .byte 0
 rx_test: .word 0

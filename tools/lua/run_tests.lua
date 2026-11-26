@@ -35,6 +35,41 @@ if DIRTY_RAM then
   end
 end
 
+-- INJECT: faults in the SPC protocol, like the ones a clone console can cause (tools/test_spc_tolerance.sh)
+--   ack:<n>   the n-th acknowledgment the main CPU writes to $2143 is replaced by a wrong value (the SPC waits)
+--   load:<n>  the $CC written to $2140 to start an upload, occurrences n to n+2, is replaced by $00, so all
+--             the attempts to load one file fail
+local INJECT = os.getenv("INJECT")
+if INJECT then
+  local kind, n = INJECT:match("^(%a+):(%d+)$")
+  n = tonumber(n)
+  local count = 0
+  if kind == "ack" then
+    emu.addMemoryCallback(function(addr, value)
+      if value == 0 then return nil end
+      count = count + 1
+      if count == n then print(string.format("INJECT: acknowledgment %d ($%02X) replaced", n, value)); return (value + 1) & 0xFF end
+      return nil
+    end, emu.callbackType.write, 0x2143, 0x2143, emu.cpuType.snes, emu.memType.snesMemory)
+  elseif kind == "load" then
+    -- the handshake is $CC in $2141 then $CC in $2140; $CC is also the index of every 256th byte of a transfer,
+    -- written to $2140 right after index $CB
+    local last2141, last2140 = -1, -1
+    emu.addMemoryCallback(function(addr, value) last2141 = value end,
+      emu.callbackType.write, 0x2141, 0x2141, emu.cpuType.snes, emu.memType.snesMemory)
+    emu.addMemoryCallback(function(addr, value)
+      local prev = last2140
+      last2140 = value
+      if value ~= 0xCC or last2141 ~= 0xCC or prev == 0xCB then return nil end
+      count = count + 1
+      if count >= n and count <= n + 2 then print(string.format("INJECT: upload handshake %d dropped", count)); return 0 end
+      return nil
+    end, emu.callbackType.write, 0x2140, 0x2140, emu.cpuType.snes, emu.memType.snesMemory)
+  else
+    print("bad INJECT: " .. INJECT); emu.stop(3); return
+  end
+end
+
 local CHK = { [0] ="ctrl", "X", "Y", "P", "A", "S", "DBR", "D", "MEM", "order", "brk", "cop", "hang", "unresp" }
 
 -- labels ----------------------------------------------------------------------------------------------------

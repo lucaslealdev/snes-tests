@@ -40,9 +40,13 @@ The report is only shown on the screen. The tests are numbered like in the gener
   press RESET. The state is kept in a part of the WRAM that no test touches, so when the ROM boots and finds it,
   it knows that a reset happened during the tests: the test in progress is reported as a hang and the run goes on
   with the next test. (A power cycle starts from scratch.)
-- **An SPC-700 test that never finishes** is detected by the main CPU, which tries to get the SPC back to the IPL
-  ROM, uploads the test program again and goes on with the next test. If the SPC doesn't answer anymore, the
-  report says so ("The SPC-700 stopped responding; N SPC tests were not run") and the 65C816 tests run next.
+- **An SPC-700 test that never finishes** is detected by the main CPU, which tells the SPC to go back to the IPL
+  ROM, uploads the test program again and goes on with the next test. A test program that can't be uploaded
+  is retried, and if it still fails, only its tests are skipped. If the SPC doesn't answer anymore, the report
+  says so ("The SPC-700 stopped responding; N SPC tests were not run") and the 65C816 tests run next.
+- **Clone consoles:** the communication with the SPC-700 is written to tolerate their different timing (every
+  port read is confirmed by a second read, all waits have generous timeouts, and the SPC can be told to restart
+  when the two sides get out of step). A clone may still report a few SPC tests as hangs.
 - A reset on the report or menu screen shows the menu again with the previous selection (no auto-start).
 
 ## Building

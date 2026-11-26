@@ -43,8 +43,13 @@ SPC_MSG_DONE = 2
 SPC_CMD_RUN  = $10
 SPC_CMD_EXIT = $20
 SPC_BOOT_SIGNATURE = $5C00     ; O0=$00, O1=$5C
-SPC_HANG_FRAMES = 120          ; frames without progress before a test is considered hung
-SPC_WAIT_FRAMES = 180          ; timeout of IPL handshakes
+; The timeouts are generous on purpose: some clone consoles have a slower or differently timed SPC-700.
+SPC_HANG_FRAMES = 240          ; frames without progress before a test is considered hung (max 255)
+SPC_WAIT_FRAMES = 300          ; timeout of IPL handshakes and of the boot of the test program
+SPC_UPLOAD_FRAMES = 900        ; timeout of a whole upload through the IPL
+SPC_LOAD_TRIES = 3             ; uploads of a file before giving up on it
+SPC_RESCUE_TRIES = 3           ; EXIT commands sent to get a hung SPC back to the IPL
+SPC_BAD_FILES_MAX = 2          ; files in a row that can't be loaded before the SPC is declared unresponsive
 
 ; Limits
 FAIL_MAX    = 1000

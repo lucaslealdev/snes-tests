@@ -4,6 +4,10 @@
 ; Port names: I0..I3 are the ports written by the main CPU ($2140-$2143) and read by the SPC ($F4-$F7);
 ;             O0..O3 are written by the SPC and read by the main CPU.
 ;
+; 0. Reads. Both sides read every port twice and only use the value when both reads agree: reading a port while
+;    the other side writes it can return a wrong value on real hardware (more often on clone consoles).
+;    All the waits of the main CPU have timeouts (SPC_* in defs.inc).
+;
 ; 1. Upload. The test program of one file (spc-tests<N>.spc, loaded at $0300) is uploaded through the IPL ROM
 ;    with the standard protocol. After the final "execute" command the IPL jumps to $0300 (main in spc_common.inc).
 ;    The main CPU waits for $BBAA in O0/O1 (IPL ready) before the upload, with a timeout.
@@ -17,13 +21,19 @@
 ;       I1 = low byte of the test number, I2 = (command << 4) | (test number >> 8)       [tests < 4096]
 ;       command $1 = RUN: run the tests from the given one to the end of its group, then send MSG_DONE.
 ;                         The test must be in the uploaded file; the SPC finds its code in a table.
-;       command $2 = EXIT: enable the IPL ROM and jump to it (the SPC is ready for another upload).
+;       command $2 = EXIT: enable the IPL ROM and jump to it (the SPC is ready for another upload). The SPC also
+;                          accepts it while it waits for the acknowledgment of a byte (step 5). I1 is set to $FF.
+;    Sequence numbers skip $CC: if the SPC is already in the IPL, $CC in I0 would start an upload there.
 ;
 ; 4. Progress (SPC -> main CPU). While running, the SPC writes the number of the test in progress to O2/O3 (at the
 ;    start of every test). If it doesn't change for SPC_HANG_FRAMES frames and the SPC sends nothing, the main CPU
-;    decides that the test never finished (hang): it records it, tries to bring the SPC back to the IPL (the SPC
-;    can only do that by itself), uploads the file again and continues with the next test; if the IPL doesn't
-;    answer, the SPC is declared unresponsive and the SPC tests that didn't run are only counted.
+;    decides that the test never finished (hang): it records it, sends EXIT (up to SPC_RESCUE_TRIES times) to bring
+;    the SPC back to the IPL, uploads the file again and continues with the next test. If the IPL doesn't answer
+;    (the SPC is stuck in a test, where EXIT can't reach it), the SPC is declared unresponsive and the SPC tests
+;    that didn't run are only counted.
+;    An upload is tried SPC_LOAD_TRIES times (with EXIT in between). If a file still can't be loaded, its groups
+;    are skipped (recorded as not run) and the runner goes on with the next file; after SPC_BAD_FILES_MAX files
+;    in a row, the SPC is declared unresponsive.
 ;
 ; 5. Byte stream (SPC -> main CPU), for failures and the end of a group. To send a byte the SPC writes it to O1,
 ;    then writes a sequence number (1..255, wrapping to 1) to O0, then waits until I3 equals that number. The main

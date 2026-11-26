@@ -1,6 +1,11 @@
 ; Runner for the SPC-700 tests. See spc_proto.inc for the protocol.
-; Groups are run one at a time. If the SPC stops making progress (a hang) the runner records it, tries to get the
-; IPL back to upload the file again, and goes on with the next test; if it can't, the SPC is "unresponsive".
+; Groups are run one at a time. If the SPC stops making progress (a hang) the runner records it, asks the SPC to go
+; back to the IPL (EXIT command; this works when the SPC is stuck in the protocol code rather than in a test),
+; uploads the file again and goes on with the next test. If a file can't be loaded, its groups are skipped; if
+; that happens to SPC_BAD_FILES_MAX files in a row, or a hung SPC can't be recovered, the SPC is "unresponsive".
+;
+; Reading a port while the other side writes it can return a wrong value on real hardware, and clone consoles
+; are more prone to it than the original. Every read of the ports is therefore confirmed by a second read.
 
 .segment "CODE"
 
@@ -21,6 +26,7 @@ spc_phase:
 	lda #$FF
 	sta spc_file
 	stz spc_seq
+	stz spc_badfiles
 	ldx #0
 	stx spc_gi
 @group:
@@ -33,7 +39,8 @@ spc_phase:
 	cmp spc_file
 	beq @loaded
 	jsr spc_load_file
-	bcs @unresponsive
+	bcs @load_failed
+	stz spc_badfiles
 @loaded:
 	ldx spc_gfirst
 	stx spc_start
@@ -44,6 +51,13 @@ spc_phase:
 	inx
 	stx spc_gi
 	bra @group
+@load_failed:
+	inc spc_badfiles
+	lda spc_badfiles
+	cmp #SPC_BAD_FILES_MAX
+	bcs @unresponsive
+	jsr spc_skip_file
+	bra @next
 @finish:
 	jsr spc_send_exit
 	lda #2
@@ -52,7 +66,8 @@ spc_phase:
 @unresponsive:
 	jmp spc_unresponsive
 
-; Reached when the SPC can't be reached anymore: records it, and the SPC tests that didn't run are only counted
+; Reached when the SPC can't be reached anymore: records it, and the SPC tests that didn't run are only counted.
+; rsv_notrun may already count the tests of files that were skipped (spc_skip_file).
 spc_unresponsive:
 	A8
 	lda #3
@@ -61,7 +76,61 @@ spc_unresponsive:
 	lda f:rsv_spc_total
 	sec
 	sbc f:rsv_spc_done
+	pha
+	sec
+	sbc f:rsv_notrun
+	sta f_expected          ; not run from now on
+	pla
+	sta f:rsv_notrun        ; not run in total
+	stz f_test
+	stz f_actual
+	stz f_addr
+	lda #FAIL_SPC|CHK_UNRESP
+	sta f_kind
+	A8
+	stz f_bank
+	jmp add_failure
+
+; The file spc_gfile couldn't be loaded (the group spc_gi is its first selected group). Its selected groups are
+; counted as not run and recorded as one "unresponsive" entry; spc_gi is left on the last group of the file.
+spc_skip_file:
+	A8
+	lda spc_gfile
+	sta spc_skipf
+	A16
+	stz f_expected
+@loop:
+	lda spc_gi
+	cmp #SPC_GROUP_COUNT
+	bcs @end
+	asl a
+	asl a
+	asl a
+	tax
+	A8
+	lda f:spc_groups+7,x
+	cmp spc_skipf
+	bne @end
+	ldx spc_gi
+	jsr spc_eligible
+	bcc @advance
+	A16
+	lda spc_gend
+	sec
+	sbc spc_gfirst
+	clc
+	adc f_expected
 	sta f_expected
+@advance:
+	A16
+	inc spc_gi
+	bra @loop
+@end:
+	A16
+	dec spc_gi              ; spc_phase goes on with the next group
+	lda f_expected
+	clc
+	adc f:rsv_notrun
 	sta f:rsv_notrun
 	stz f_test
 	stz f_actual
@@ -107,32 +176,70 @@ spc_eligible:
 	clc
 	rts
 
-; Loads the file spc_gfile (sends EXIT to the previous one first). Carry set if the SPC doesn't respond
+; Loads the file spc_gfile (sends EXIT to the previous one first), trying SPC_LOAD_TRIES times.
+; Carry set if the SPC doesn't respond.
 spc_load_file:
+	lda #SPC_LOAD_TRIES
+	sta spc_try
 	lda spc_file
 	cmp #$FF
 	beq @upload
 	jsr spc_send_exit
 @upload:
+	lda #$FF
+	sta spc_file
 	lda spc_gfile
 	jsr spc_upload
-	bcs @fail
+	bcc @ok
+	; The SPC may be running the program (and we missed its boot signature) or waiting in the protocol code:
+	; ask it to go back to the IPL, and try again
+	jsr spc_send_exit
+	dec spc_try
+	bne @upload
+	sec
+	rts
+@ok:
 	lda spc_gfile
 	sta spc_file
 	clc
 	rts
-@fail:
-	lda #$FF
-	sta spc_file
-	sec
-	rts
 
-spc_send_exit:
-	lda #SPC_CMD_EXIT
-	sta $2142
+; Next command sequence number. $CC is skipped: if the SPC is already in the IPL, $CC in port 0 would start an
+; upload there.
+spc_next_seq:
 	inc spc_seq
 	lda spc_seq
+	cmp #$CC
+	bne @ok
+	inc spc_seq
+	lda spc_seq
+@ok:
+	rts
+
+; EXIT command: the test program enables the IPL ROM and jumps to it. I1 is not used by EXIT; it is set nonzero
+; so that the IPL, should it be in the middle of a transfer, doesn't take the command for "execute".
+spc_send_exit:
+	lda #$FF
+	sta $2141
+	lda #SPC_CMD_EXIT
+	sta $2142
+	jsr spc_next_seq
 	sta $2140
+	rts
+
+; Tries to get a hung SPC back to the IPL: sends EXIT and waits for the IPL, SPC_RESCUE_TRIES times.
+; Carry set if the IPL never answered.
+spc_rescue:
+	lda #SPC_RESCUE_TRIES
+	sta spc_try
+@try:
+	jsr spc_send_exit
+	jsr spc_wait_ipl
+	bcc @ok
+	dec spc_try
+	bne @try
+	sec
+@ok:
 	rts
 
 ; Runs the tests from spc_start to the end of the group spc_gi, recovering from hangs.
@@ -152,8 +259,7 @@ spc_run_group:
 	sta $2142
 	stz done_flag
 	stz rx_state
-	inc spc_seq
-	lda spc_seq
+	jsr spc_next_seq
 	sta $2140
 	jsr spc_poll
 	bne @hang
@@ -198,7 +304,7 @@ spc_run_group:
 	; get the SPC back
 	lda #$FF
 	sta spc_file
-	jsr spc_wait_ipl
+	jsr spc_rescue
 	bcs @dead
 	jsr spc_load_file
 	bcs @dead
@@ -221,38 +327,81 @@ spc_run_group:
 	sec
 	rts
 
-; Waits for the IPL ROM to be ready ($BBAA). Carry set on timeout
-spc_wait_ipl:
-	ldx #SPC_WAIT_FRAMES
-	stx timeout
-@loop:
-	ldx $2140
-	cpx #$BBAA
-	beq @ok
-	lda $4210
-	bpl @loop
+; One frame passed while waiting: counts it for the elapsed time and decrements `timeout`.
+; Carry set when the timeout ran out. Keeps A and Y.
+spc_tick:
 	inc frame_acc
 	ldx timeout
 	dex
 	stx timeout
-	bne @loop
+	bne @more
 	sec
+	rts
+@more:
+	clc
+	rts
+
+; Waits until port 0 reads A twice in a row. Carry set when `timeout` runs out (see spc_tick). Keeps A and Y.
+; Used inside a longer operation (an upload) that has a single timeout.
+spc_wait_p0:
+@loop:
+	cmp $2140
+	bne @tick
+	cmp $2140
+	beq @ok
+@tick:
+	bit $4210
+	bpl @loop
+	jsr spc_tick
+	bcc @loop
 	rts
 @ok:
 	clc
 	rts
 
+; Waits for the IPL ROM to be ready ($BBAA in ports 0/1). Carry set on timeout
+spc_wait_ipl:
+	ldx #SPC_WAIT_FRAMES
+	stx timeout
+@loop:
+	ldy $2140
+	cpy #$BBAA
+	bne @tick
+	cpy $2140
+	beq @ok
+@tick:
+	bit $4210
+	bpl @loop
+	jsr spc_tick
+	bcc @loop
+	rts
+@ok:
+	clc
+	rts
+
+; Reads the test in progress (ports 2/3) into X, confirmed by a second read
+spc_read_progress:
+	ldx $2142
+	cpx $2142
+	bne spc_read_progress
+	rts
+
 ; Polls the SPC until the group is done (Z set) or it hangs (Z clear)
 spc_poll:
 	stz spc_wd
-	ldx $2142
+	jsr spc_read_progress
 	stx spc_last
 @loop:
 	lda $2140
+	cmp $2140
+	bne @nobyte          ; changing right now: read it again later
 	cmp rx_seq
 	beq @nobyte
 	sta rx_seq
+@data:
 	lda $2141
+	cmp $2141
+	bne @data
 	jsr spc_rx_byte
 	lda rx_seq
 	sta $2143            ; acknowledge
@@ -265,7 +414,7 @@ spc_poll:
 	bpl @loop
 	; one frame passed
 	inc frame_acc
-	ldx $2142
+	jsr spc_read_progress
 	cpx spc_last
 	beq @same
 	stx spc_last
@@ -321,7 +470,7 @@ spc_rx_byte:
 	bne @ret
 	lda #1
 	sta rx_state
-	ldx $2142             ; the number of the test that failed
+	jsr spc_read_progress ; the number of the test that failed
 	stx rx_test
 @ret:
 	rts
@@ -360,7 +509,7 @@ spc_rx_byte:
 	jmp add_failure
 
 ; Uploads the test program of file A through the IPL ROM, and waits for it to start.
-; Carry set if the SPC doesn't respond (the IPL is not ready or the program doesn't start).
+; Carry set if the SPC doesn't respond (the IPL is not ready, the transfer stalls or the program doesn't start).
 spc_upload:
 	A16
 	and #$00FF
@@ -384,26 +533,27 @@ spc_upload:
 	bcc @go
 	rts
 @go:
+	ldx #SPC_UPLOAD_FRAMES
+	stx timeout
 	ldx #$0300
 	stx $2142
 	lda #$CC
 	sta $2141
 	sta $2140
-@w2:
-	cmp $2140
-	bne @w2
+	jsr spc_wait_p0
+	bcc :+
+	jmp @fail
+:
 	ldy #0
 @loop:
 	lda [spc_src],y
 	sta $2141
 	tya
 	sta $2140
-	bit $4210            ; count the frames, for the elapsed time
-	bpl @w3
-	inc frame_acc
-@w3:
-	cmp $2140
-	bne @w3
+	jsr spc_wait_p0
+	bcc :+
+	jmp @fail
+:
 	iny
 	cpy spc_size
 	bne @loop
@@ -414,23 +564,25 @@ spc_upload:
 	inc a
 	sta spc_seq
 	sta $2140
-@w4:
-	cmp $2140
-	bne @w4
+	jsr spc_wait_p0
+	bcc :+
+	jmp @fail
+:
 	; wait for the program to say it's running
 	ldx #SPC_WAIT_FRAMES
 	stx timeout
 @w5:
-	ldx $2140
-	cpx #SPC_BOOT_SIGNATURE
+	ldy $2140
+	cpy #SPC_BOOT_SIGNATURE
+	bne @t5
+	cpy $2140
 	beq @booted
-	lda $4210
+@t5:
+	bit $4210
 	bpl @w5
-	inc frame_acc
-	ldx timeout
-	dex
-	stx timeout
-	bne @w5
+	jsr spc_tick
+	bcc @w5
+@fail:
 	sec
 	rts
 @booted:

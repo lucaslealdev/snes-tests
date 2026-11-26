@@ -42,12 +42,20 @@ main:
     mov $f4, #$00
     mov $f5, #$5C  ; boot signature: O0=$00 O1=$5C. Tells the main CPU that we are running
 
+; Every read of a port is confirmed by a second read: reading a port while the main CPU writes it can return a
+; wrong value (more often on clone consoles).
 cmd_wait:
     mov a, $f4
+    cmp a, $f4
+    bne cmd_wait
     cmp a, last_cmd
     beq cmd_wait
     mov last_cmd, a
-    mov a, $f6
+.params:            ; the main CPU writes I1/I2 before I0, so they are stable by now; confirm anyway
+    movw ya, $f5
+    cmpw ya, $f5
+    bne .params
+    mov a, y
     and a, #$F0
     cmp a, #CMD_EXIT
     beq exit_to_ipl
@@ -146,8 +154,23 @@ send_byte:
     mov $f4, a        ; O0 = sequence number. This publishes the byte
 .wait:
     mov a, $f7        ; I3 = sequence number of the last byte read by the main CPU
-    cmp a, txseq
+    cmp a, $f7
     bne .wait
+    cmp a, txseq
+    beq .acked
+    ; While waiting, the main CPU may give up on us (it thinks we hung) and send EXIT: obey it, so it can upload
+    ; the program again instead of declaring the SPC unresponsive
+    mov a, $f4
+    cmp a, $f4
+    bne .wait
+    cmp a, last_cmd
+    beq .wait
+    mov a, $f6
+    and a, #$F0
+    cmp a, #CMD_EXIT
+    bne .wait
+    jmp exit_to_ipl
+.acked:
     ret
 
 
