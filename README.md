@@ -43,8 +43,7 @@ no expected value was changed. Everything around them was rewritten.
 | Hands-free runs | — | **Auto-start** after 10 s, for emulator test runners and CI |
 | Verification | Manual | **Automated suite in Mesen2**: full run, menu, planted failures, garbage RAM, simulated protocol faults |
 
-All tests pass on an original console, on two clone consoles and in Mesen2. The APU I/O port tests are the
-newest group and have so far only been run in Mesen2.
+All tests pass on an original console, on two clone consoles and in Mesen2.
 
 ## Using the ROM
 
