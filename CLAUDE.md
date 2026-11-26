@@ -29,6 +29,12 @@ Tests of the ROM in Mesen2 2.x headless (`--testrunner` + Lua; `tools/run_mesen.
 failures, with the text in `tools/debug-expected-text.txt`), `tools/lua/test_reset.lua`.
 In the Lua API `emu.log()` doesn't print in the test runner: use `print()`.
 
+Mesen zeroes WRAM at power-on by default (`Snes.RamPowerOnState`), but a real console and snes9x don't. Relying
+on a variable starting at 0 once made the menu show no text on hardware while every Mesen test passed. `main`
+now clears all WRAM except the reserved state at boot; keep it that way, and keep testing with garbage RAM:
+`DIRTY_RAM=<seed> tools/run_mesen.sh` (full run) and `tools/lua/test_dirty_ram.lua` (menu text), both in
+`make test`.
+
 There is no option to run a single test: use the menu to select groups, or temporarily trim `add_all_tests()`
 (don't commit that).
 

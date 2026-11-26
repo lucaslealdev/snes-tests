@@ -84,6 +84,8 @@ check: $(BUILD)/cpu.stamp $(BUILD)/spc.stamp
 # --- Tests of the ROM in Mesen2 (headless). Set MESEN to the path of the Mesen binary.
 test: all check
 	tools/run_mesen.sh
+	DIRTY_RAM=1 tools/run_mesen.sh
+	tools/run_mesen.sh snes-tests.sfc tools/lua/test_dirty_ram.lua
 	tools/test_menu.sh
 	tools/test_debug_build.sh
 

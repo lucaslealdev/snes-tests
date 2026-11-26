@@ -155,6 +155,33 @@ main:
 	lda #0
 	tcd
 	A8
+	; Clear all of WRAM except the reserved state (rsv_start-rsv_end), which must survive a reset. A real console
+	; (and snes9x) powers on with garbage in WRAM, and the harness assumes its variables start at 0. Mesen zeroes
+	; WRAM by default, which hid this: see tools/lua/test_dirty_ram.lua. Inline, because it also clears the stack.
+	ldx #0
+	stx $2181
+	stz $2183        ; WRAM address = $7E0000
+	lda #$08
+	sta $4300        ; DMA0: fixed source, A->B
+	lda #$80
+	sta $4301        ; B bus: $2180 (WMDATA)
+	ldx #.loword(zero_byte)
+	stx $4302
+	lda #^zero_byte
+	sta $4304
+	ldx #0
+	stx $4305        ; 64KB: $7E0000-$7EFFFF
+	lda #$01
+	sta $420B
+	ldx #.loword(rsv_start)
+	stx $4305        ; $7F0000 up to rsv_start (the WRAM address continues from $7F0000)
+	sta $420B
+	ldx #.loword(rsv_end)
+	stx $2181
+	sta $2183        ; WRAM address = rsv_end (bank $7F)
+	ldx #.loword(-rsv_end)
+	stx $4305        ; rsv_end up to $7FFFFF
+	sta $420B
 	jsr hw_init
 	jsr state_validate
 	bcc @power_on

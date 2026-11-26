@@ -24,7 +24,18 @@ local VERBOSE = os.getenv("VERBOSE")
 local SHOT_REPORT = os.getenv("SHOT_REPORT")
 local SHOT_DETAIL = os.getenv("SHOT_DETAIL")
 
-local CHK = { [0] = "ctrl", "X", "Y", "P", "A", "S", "DBR", "D", "MEM", "order", "brk", "cop", "hang", "unresp" }
+-- DIRTY_RAM=<seed>: fill WRAM with pseudo-random bytes before the first instruction, like a real console at
+-- power-on (Mesen zeroes it by default, which hides reads of uninitialized variables)
+local DIRTY_RAM = tonumber(os.getenv("DIRTY_RAM") or "")
+if DIRTY_RAM then
+  local s = DIRTY_RAM
+  for a = 0, 0x1FFFF do
+    s = (s * 1103515245 + 12345) % 2147483648
+    emu.write(a, (s >> 16) & 0xFF, emu.memType.snesWorkRam)
+  end
+end
+
+local CHK = { [0] ="ctrl", "X", "Y", "P", "A", "S", "DBR", "D", "MEM", "order", "brk", "cop", "hang", "unresp" }
 
 -- labels ----------------------------------------------------------------------------------------------------
 local sym = {}
